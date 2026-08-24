@@ -1,9 +1,44 @@
 #!/usr/bin/env node
 
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { VERSION, resourcePaths } from "./index.js";
+import {
+  VERSION,
+  RecoverableError,
+  createEditCandidate,
+  errorEnvelope,
+  inspectRFile,
+  resourcePaths,
+} from "./index.js";
+
+function printJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+async function runRFunctions(args: string[]): Promise<void> {
+  try {
+    if (args.length === 2 && args[0] === "inspect") {
+      printJson({ ok: true, value: await inspectRFile(args[1]) });
+      return;
+    }
+    if (args.length === 2 && args[0] === "edit") {
+      let request: unknown;
+      try {
+        request = JSON.parse(await readFile(args[1], "utf8"));
+      } catch {
+        throw new RecoverableError("INVALID_REQUEST", "Edit request must be readable JSON");
+      }
+      printJson({ ok: true, value: await createEditCandidate(request) });
+      return;
+    }
+    process.stderr.write("Usage: pi-r r-functions inspect FILE | pi-r r-functions edit REQUEST.json\n");
+    process.exitCode = 2;
+  } catch (error) {
+    printJson(errorEnvelope(error));
+    process.exitCode = 1;
+  }
+}
 
 async function printPaths(asJson: boolean): Promise<void> {
   const paths = resourcePaths();
@@ -30,7 +65,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  process.stderr.write("Usage: pi-r --version | pi-r paths [--json]\n");
+  if (args[0] === "r-functions") {
+    await runRFunctions(args.slice(1));
+    return;
+  }
+
+  process.stderr.write(
+    "Usage: pi-r --version | pi-r paths [--json] | pi-r r-functions <inspect|edit> ...\n",
+  );
   process.exitCode = 2;
 }
 

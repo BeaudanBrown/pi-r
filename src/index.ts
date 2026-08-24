@@ -1,7 +1,13 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.0";
+export { createEditCandidate } from "./r-edit/scoped-edit.js";
+export { errorEnvelope, RecoverableError } from "./r-edit/errors.js";
+export type { StructuredError } from "./r-edit/errors.js";
+export { inspectRFile } from "./r-edit/tree-sitter.js";
+export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
+
+export const VERSION = "0.2.0";
 
 export interface ResourcePaths {
   resources: string;

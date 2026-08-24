@@ -12,15 +12,21 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.1.0" { } ''
-            mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R
+          piResources = pkgs.runCommand "pi-r-resources-0.2.0" { } ''
+            mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
             cp ${./extensions/pi-r.ts} $out/share/pi-r/extensions/pi-r.ts
             cp ${./R/pi_r_runtime.R} $out/share/pi-r/R/pi_r_runtime.R
+            cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
+            cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
           '';
+
+          rRuntime = pkgs.rWrapper.override {
+            packages = [ pkgs.rPackages.styler ];
+          };
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.1.0";
+            version = "0.2.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -42,7 +48,14 @@
               ln -s ${piResources}/share/pi-r $out/share/pi-r
               makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/pi-r \
                 --add-flags "$out/lib/pi-r/cli.mjs" \
-                --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r"
+                --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.tree-sitter rRuntime ]}" \
+                --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
+                --set-default PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
+                --set-default PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
+                --set-default PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
+                --set-default PI_R_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set-default PI_R_BASE_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set-default PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R"
               runHook postInstall
             '';
 
@@ -71,7 +84,7 @@
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.1.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.2.0" {
             nativeBuildInputs = [ pkgs.esbuild pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -89,6 +102,9 @@
               node --test ${./tests/library-smoke.test.mjs}
             PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               node --test ${./tests/extension-smoke.test.mjs}
+            PI_R_CLI=${piR}/bin/pi-r \
+              PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \
+              node --test ${./tests/scoped-edit-cli.test.mjs}
             PI_R_HELPER=${resources}/share/pi-r/R/pi_r_runtime.R \
               Rscript --vanilla ${./tests/runtime-smoke.R}
 

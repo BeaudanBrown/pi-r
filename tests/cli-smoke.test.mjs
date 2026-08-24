@@ -13,7 +13,7 @@ if (!cli) throw new Error("PI_R_CLI must point to the packaged pi-r executable")
 
 test("the packaged CLI reports its version", async () => {
   const { stdout } = await execFileAsync(cli, ["--version"]);
-  assert.match(stdout.trim(), /^pi-r 0\.1\.0$/);
+  assert.match(stdout.trim(), /^pi-r 0\.2\.0$/);
 });
 
 test("the packaged CLI exposes usable Pi and R resource paths", async () => {

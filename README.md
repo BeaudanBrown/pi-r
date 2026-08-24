@@ -30,6 +30,34 @@ nix eval --json .#packages.$(nix eval --raw --impure --expr builtins.currentSyst
 
 The extension resource can be tried with Pi using the `extension` path reported above. It currently contributes only the inactive `/r` command surface; constrained workbench behavior is implemented in subsequent issues.
 
+## Scoped R function tracer
+
+Inspect top-level functions without changing a file:
+
+```console
+nix run . -- r-functions inspect path/to/functions.R
+```
+
+Request a replacement or exact patch using JSON:
+
+```json
+{
+  "path": "path/to/functions.R",
+  "function": "summarise_groups",
+  "operation": {
+    "kind": "patch",
+    "oldText": "mean(x)",
+    "newText": "median(x)"
+  }
+}
+```
+
+```console
+nix run . -- r-functions edit request.json
+```
+
+The command returns a formatted and validated candidate in a JSON envelope; it never writes the source file. See [the formatter evaluation](docs/formatter-evaluation.md) for the pinned formatting policy.
+
 Enter the development environment and run the canonical gate:
 
 ```console
