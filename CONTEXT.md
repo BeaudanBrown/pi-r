@@ -63,3 +63,11 @@ _Avoid_: Edit, write
 **Source Digest**:
 The SHA-256 token returned by Approved Function inspection and required by a Scoped Mutation to reject stale source.
 _Avoid_: Version, checksum
+
+**Persistent R Worker**:
+The session-scoped Bubblewrap process that evaluates bounded temporary R code while project and attached source remain read-only.
+_Avoid_: REPL, R session
+
+**Transient State**:
+Non-durable assignments and explicitly loaded target objects held by the Persistent R Worker until reset, crash, lock, or shutdown.
+_Avoid_: Workspace, cache

@@ -83,7 +83,7 @@ function nixRAttribute(packageName: string): string {
 
 function flakeFile(contract: ProjectContract): string {
   const pin = contract.project.nixpkgs;
-  const dependencies = [...new Set(["targets", "qs", ...contract.dependencies])].sort();
+  const dependencies = [...new Set(["jsonlite", "targets", "qs", ...contract.dependencies])].sort();
   const rPackages = dependencies
     .map((dependency) => `rPackages.${JSON.stringify(nixRAttribute(dependency))}`)
     .join(" ");

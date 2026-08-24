@@ -6,10 +6,22 @@ import { renderScaffold } from "../src/contract/scaffold.js";
 import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
+import { SandboxedRWorker, type WorkerEnvironment, type WorkerState } from "../src/workbench/r-worker.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
+const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
+const EVALUATE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["code", "targets"],
+  properties: {
+    code: { type: "string", minLength: 1, maxLength: 50_000 },
+    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+  },
+} as const;
+const EMPTY_SCHEMA = { type: "object", additionalProperties: false, properties: {} } as const;
 const INSPECT_TOOL = "r_function_inspect";
 const EDIT_TOOL = "r_function_edit";
 const INSPECT_SCHEMA = {
@@ -62,7 +74,7 @@ interface WorkbenchState {
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
   pendingApproval: "none" | "contract-lock";
-  workerState: "stopped";
+  workerState: WorkerState;
   readOnlyRoots: string[];
   allowedTools: string[];
 }
@@ -142,7 +154,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
     state.policyState === "pi-r-policy-v1" &&
     typeof state.editableScopeCount === "number" &&
     (state.pendingApproval === "none" || state.pendingApproval === "contract-lock") &&
-    state.workerState === "stopped" &&
+    (state.workerState === "stopped" || state.workerState === "running" || state.workerState === "crashed") &&
     Array.isArray(state.readOnlyRoots) &&
     state.readOnlyRoots.every((root) => typeof root === "string" && isAbsolute(root)) &&
     Array.isArray(state.allowedTools)
@@ -222,8 +234,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let previousActiveTools: string[] | undefined;
   let proposalRegistered = false;
   let editRegistered = false;
+  let workerRegistered = false;
+  let worker: SandboxedRWorker | undefined;
+  let projectRscript: string | undefined;
   let proposalQueue: Promise<void> = Promise.resolve();
   let editQueue: Promise<void> = Promise.resolve();
+  let workerQueue: Promise<void> = Promise.resolve();
 
   async function git(args: string[], cwd: string, allowFailure = false): Promise<ExecResult> {
     const result = await pi.exec("git", args, { cwd, timeout: 10_000 });
@@ -242,9 +258,146 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   function phaseTools(phase: Phase): string[] {
-    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose"];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL];
+    const workerTools = workerRegistered ? [...WORKER_TOOLS] : [];
+    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools];
     return safeReadTools();
+  }
+
+  function workerInstance(): SandboxedRWorker {
+    if (!state) throw new RecoverableError("INVALID_PHASE", "R exploration requires an active Workbench Session");
+    worker ??= new SandboxedRWorker({
+      projectRoot: state.projectRoot,
+      readOnlyRoots: state.readOnlyRoots,
+      workerScript: process.env.PI_R_WORKER_SCRIPT ?? "",
+      bwrap: process.env.PI_R_BWRAP,
+      onState(nextState) {
+        if (state) state = { ...state, workerState: nextState };
+      },
+    });
+    return worker;
+  }
+
+  async function workerRuntime(environment: WorkerEnvironment): Promise<string> {
+    if (!state) throw new RecoverableError("INVALID_PHASE", "R exploration requires an active Workbench Session");
+    if (environment === "design") {
+      const rscript = process.env.PI_R_WORKER_RSCRIPT ?? process.env.PI_R_RSCRIPT;
+      if (!rscript) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
+      return rscript;
+    }
+    if (projectRscript) return projectRscript;
+    const explicitProjectRuntime = process.env.PI_R_PROJECT_RSCRIPT;
+    if (explicitProjectRuntime) {
+      if (!isAbsolute(explicitProjectRuntime)) {
+        throw new RecoverableError("WORKER_START_FAILED", "Generated project R runtime override must be absolute");
+      }
+      projectRscript = explicitProjectRuntime;
+      return projectRscript;
+    }
+    const result = await pi.exec(
+      "nix",
+      ["--extra-experimental-features", "nix-command flakes", "develop", `path:${state.projectRoot}`, "--command", "which", "Rscript"],
+      { cwd: state.projectRoot, timeout: 120_000 },
+    );
+    if (result.code !== 0 || !isAbsolute(result.stdout.trim())) {
+      throw new RecoverableError("WORKER_START_FAILED", `Generated project R environment is unavailable: ${resultMessage(result)}`);
+    }
+    projectRscript = result.stdout.trim();
+    return projectRscript;
+  }
+
+  function boundedJson(value: unknown): string {
+    const text = JSON.stringify(value, null, 2);
+    return text.length <= 8192 ? text : `${text.slice(0, 8192)}\n[structured result truncated]`;
+  }
+
+  async function workerStatusText(): Promise<string> {
+    const status = worker
+      ? await worker.status().catch(() => ({ state: "crashed" as const, objects: [], transientStateLost: true }))
+      : { state: "stopped" as const, objects: [], transientStateLost: false };
+    const inventory = status.objects.length
+      ? status.objects.map((object) => `${object.name}~${object.bytes}B`).join(", ")
+      : "none";
+    return `objects=${inventory}${status.transientStateLost ? " transient-state-lost=true" : ""}`;
+  }
+
+  async function assertWorkerProvenance(context: CommandContext): Promise<void> {
+    if (!state) throw new RecoverableError("INVALID_PHASE", "R exploration requires an active Workbench Session");
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
+    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+    if (dirty.stdout.trim()) throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
+  }
+
+  function registerWorkerTools(): void {
+    if (workerRegistered) return;
+    workerRegistered = true;
+    pi.registerTool({
+      name: "evaluate_r",
+      label: "Evaluate temporary R code",
+      description: "Evaluate bounded temporary R code in the persistent read-only Bubblewrap worker, loading only named targets.",
+      promptSnippet: "Explore with temporary assignments; request every target explicitly by its canonical name",
+      parameters: EVALUATE_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        const operation = workerQueue.then(async () => {
+          await assertWorkerProvenance(context);
+          const environment: WorkerEnvironment = state?.phase === "implementation" ? "project" : "design";
+          const runtime = await workerRuntime(environment);
+          const input = params as { code?: unknown; targets?: unknown };
+          const result = await workerInstance().evaluate(
+            { code: input.code as string, targets: input.targets as string[] },
+            environment,
+            runtime,
+            signal,
+          );
+          if (state) {
+            state = { ...state, workerState: worker?.state ?? "stopped" };
+            showHud(context, state);
+          }
+          return result;
+        });
+        workerQueue = operation.then(() => undefined, () => undefined);
+        try {
+          const result = await operation;
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        } catch (error) {
+          if (state) {
+            state = { ...state, workerState: worker?.state ?? "crashed" };
+            showHud(context, state);
+          }
+          throw actionableToolError(error);
+        }
+      },
+    });
+    pi.registerTool({
+      name: "r_worker_status",
+      label: "Inspect temporary R state",
+      description: "List current worker objects and approximate sizes without starting a worker.",
+      parameters: EMPTY_SCHEMA,
+      async execute(_toolCallId, _params, _signal, _onUpdate, context) {
+        await assertWorkerProvenance(context);
+        const status = worker
+          ? await worker.status()
+          : { state: "stopped" as const, objects: [], transientStateLost: false };
+        return { content: [{ type: "text", text: boundedJson(status) }], details: status };
+      },
+    });
+    pi.registerTool({
+      name: "r_worker_reset",
+      label: "Reset temporary R state",
+      description: "Stop the session worker and clearly report how many transient objects were lost.",
+      parameters: EMPTY_SCHEMA,
+      async execute(_toolCallId, _params, _signal, _onUpdate, context) {
+        await assertWorkerProvenance(context);
+        const reset = worker ? await worker.reset() : { lostObjects: 0, reason: "reset requested" };
+        worker = undefined;
+        if (state) {
+          state = { ...state, workerState: "stopped" };
+          showHud(context, state);
+        }
+        return { content: [{ type: "text", text: boundedJson({ ...reset, transientStateLost: reset.lostObjects > 0 }) }], details: reset };
+      },
+    });
   }
 
   function enterPhase(next: WorkbenchState): void {
@@ -477,7 +630,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
       () => "present" as const,
       () => "missing" as const,
     );
+    worker?.stop(true);
+    worker = undefined;
+    projectRscript = undefined;
     registerProposalTool();
+    registerWorkerTools();
     const next: WorkbenchState = {
       version: 1,
       phase: "design",
@@ -505,6 +662,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
   ): Promise<WorkbenchState> {
     if (!state) throw new Error("Workbench state disappeared");
     const root = state.projectRoot;
+    if (worker) {
+      await worker.reset("Project Contract locked; restarting in generated project environment");
+      worker = undefined;
+      projectRscript = undefined;
+      state = { ...state, workerState: "stopped" };
+    }
     const paths = [...files.keys()];
     const snapshots = new Map<string, string | undefined>();
     for (const path of paths) snapshots.set(path, await readFile(resolve(root, path), "utf8").catch(() => undefined));
@@ -595,9 +758,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
         quarantine(context, `pi-r cannot resume: ${mismatch}`);
         return;
       }
+      registerWorkerTools();
       if (restored.phase === "design") registerProposalTool();
       if (restored.phase === "implementation") registerEditTool();
-      enterPhase(restored);
+      enterPhase({ ...restored, workerState: "stopped" });
       showHud(context, restored);
     } catch (error) {
       quarantine(context, `pi-r cannot resume: ${error instanceof Error ? error.message : String(error)}`);
@@ -605,6 +769,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, context) => {
+    worker?.stop();
+    worker = undefined;
     if (previousActiveTools) pi.setActiveTools(previousActiveTools);
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", undefined);
@@ -617,6 +783,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       return { block: true, reason: `pi-r ${state.phase} mode blocks this tool` };
     }
     if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
+    if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
     if ((event.toolName === INSPECT_TOOL || event.toolName === EDIT_TOOL) && state.phase === "implementation") return undefined;
     if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
@@ -638,8 +805,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
       : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools.";
+    const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
-      systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}`,
+      systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
     };
   });
 
@@ -658,7 +826,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           return;
         }
         showHud(context, state);
-        context.ui.notify(hud(state), "info");
+        context.ui.notify(`${hud(state)}\n${await workerStatusText()}`, "info");
         return;
       }
       if (subcommand === "lock") {

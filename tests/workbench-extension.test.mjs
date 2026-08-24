@@ -119,11 +119,11 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.equal(await git(root, "status", "--porcelain", "--untracked-files=no"), "");
   assert.match(await git(root, "stash", "list"), /pi-r: tracked changes before workbench start/);
   assert.equal(await readFile(join(root, "untracked.txt"), "utf8"), "preserve me\n");
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose"]);
   assert.equal(h.appended.length, 1);
   assert.equal(h.appended[0].customType, "pi-r-workbench-state");
   assert.equal(h.appended[0].data.phase, "design");
   assert.deepEqual(h.appended[0].data.readOnlyRoots, [await realpath(attached)]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset"]);
   assert.match(ctx.widgets.at(-1)[1][0], /phase=design .*branch=pi-r\/workbench@[0-9a-f]{7,}/);
   assert.match(ctx.widgets.at(-1)[1][0], /contract=missing policy=pi-r-policy-v1 scopes=0 approval=none worker=stopped/);
 
@@ -163,6 +163,99 @@ test("design mode gates model tools to reads inside approved roots", async () =>
   assert.equal((await gate({ toolName: "write", input: { path: join(root, "x") } }, ctx)).block, true);
 });
 
+test("design mode lazily evaluates structured R calls in one persistent sandbox", { timeout: 30_000 }, async (t) => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  assert.ok(evaluate, "Design Mode must expose structured R evaluation");
+
+  const first = await evaluate.execute("evaluate-1", {
+    code: "message('hello')\nwarning('careful')\nx <- 41L\nx + 1L",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(first.details.value, 42);
+  assert.match(first.details.preview, /42/);
+  assert.deepEqual(first.details.messages, ["hello"]);
+  assert.deepEqual(first.details.warnings, ["careful"]);
+  assert.equal(first.details.error, null);
+  assert.equal(first.details.worker.started, true);
+  assert.equal(first.details.worker.environment, "design");
+
+  const second = await evaluate.execute("evaluate-2", {
+    code: "x + 2L",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(second.details.error, null);
+  assert.equal(second.details.value, 43);
+  assert.equal(second.details.worker.started, false);
+  assert.match(ctx.widgets.at(-1)[1][0], /worker=running/);
+});
+
+test("the worker can write temporary storage but cannot mutate project or attached source", { timeout: 30_000 }, async (t) => {
+  const root = await repository();
+  const attached = await mkdtemp(join(tmpdir(), "pi-r-worker-input-"));
+  await writeFile(join(attached, "input.txt"), "attached input\n");
+  const h = harness();
+  const ctx = context(root);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler(`start ${attached}`, ctx);
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+
+  const readable = await evaluate.execute("read-attached", {
+    code: `readLines(${JSON.stringify(join(attached, "input.txt"))})`,
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(readable.details.value, "attached input");
+  const temporary = await evaluate.execute("write-temp", {
+    code: "path <- tempfile(); writeLines('temporary', path); readLines(path)",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(temporary.details.value, "temporary");
+  const blocked = await evaluate.execute("write-source", {
+    code: "writeLines('mutated', 'analysis.R')",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(blocked.details.error.code, "R_EVALUATION_ERROR");
+  assert.match(blocked.details.error.message, /cannot open|read-only/i);
+  assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 1\n");
+});
+
+test("worker status, reset, and crash recovery report transient state loss", { timeout: 30_000 }, async (t) => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const status = h.tools.find((tool) => tool.name === "r_worker_status");
+  const reset = h.tools.find((tool) => tool.name === "r_worker_reset");
+  await evaluate.execute("assign", { code: "temporary_object <- rep(1L, 100L)", targets: [] }, undefined, undefined, ctx);
+
+  const running = await status.execute("status", {}, undefined, undefined, ctx);
+  const object = running.details.objects.find((candidate) => candidate.name === "temporary_object");
+  assert.equal(running.details.state, "running");
+  assert.equal(object.origin, "temporary");
+  assert.ok(object.bytes > 0);
+  await h.commands[0].options.handler("status", ctx);
+  assert.match(ctx.notifications.at(-1)[0], /objects=temporary_object~[0-9]+B/);
+  const cleared = await reset.execute("reset", {}, undefined, undefined, ctx);
+  assert.ok(cleared.details.lostObjects >= 1);
+  assert.match(cleared.content[0].text, /transientStateLost.*true/);
+  assert.equal((await status.execute("stopped", {}, undefined, undefined, ctx)).details.state, "stopped");
+
+  await assert.rejects(
+    evaluate.execute("crash", { code: "quit(save = 'no', status = 17L)", targets: [] }, undefined, undefined, ctx),
+    /WORKER_CRASH.*transient state was lost/i,
+  );
+  const recovered = await evaluate.execute("recover", { code: "1L", targets: [] }, undefined, undefined, ctx);
+  assert.equal(recovered.details.value, 1);
+  assert.equal(recovered.details.worker.started, true);
+  assert.equal(recovered.details.worker.transientStateLost, true);
+});
+
 test("typed proposals preserve one ignored draft and /r lock commits the reviewed scaffold atomically", async () => {
   const root = await repository();
   const h = harness();
@@ -200,8 +293,72 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
+});
+
+test("evaluate_r loads only explicitly requested targets under canonical names", { timeout: 60_000 }, async (t) => {
+  const root = await repository();
+  await writeFile(join(root, "_targets.R"), [
+    "library(targets)",
+    "global_value <- 7L",
+    "list(tar_target(sample_target, global_value * 6L, format = 'rds'))",
+    "",
+  ].join("\n"));
+  await git(root, "add", "_targets.R");
+  await git(root, "commit", "-qm", "add target fixture");
+  await execFileAsync(process.env.PI_R_WORKER_RSCRIPT, [
+    "--vanilla", "-e", "targets::tar_make(reporter = 'silent')",
+  ], { cwd: root, timeout: 30_000 });
+  const h = harness();
+  const ctx = context(root);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+
+  const loaded = await evaluate.execute("load-target", { code: "sample_target", targets: ["sample_target"] }, undefined, undefined, ctx);
+  assert.equal(loaded.details.error, null);
+  assert.equal(loaded.details.value, 42);
+  assert.ok(loaded.details.objects.some((object) => object.name === "sample_target" && object.origin === "target"));
+  const unloaded = await evaluate.execute("omit-target", {
+    code: "exists('sample_target', inherits = TRUE)",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(unloaded.details.value, false);
+  assert.ok(unloaded.details.objects.some((object) => object.name === "global_value" && object.origin === "global"));
+});
+
+test("locking restarts exploration in the generated environment with canonical globals and constants", { timeout: 180_000 }, async (t) => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root, [], [true]);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  await evaluate.execute("design-state", { code: "design_only <- 99L", targets: [] }, undefined, undefined, ctx);
+  const contract = await fixtureContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+
+  const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
+  const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
+  const inspected = await inspectTool.execute("inspect-load", { function: "load_input" }, undefined, undefined, ctx);
+  await editTool.execute("implement-load", {
+    function: "load_input",
+    expectedSourceHash: inspected.details.sourceHash,
+    operation: { kind: "replace", body: "{\npath\n}" },
+  }, undefined, undefined, ctx);
+  const loaded = await evaluate.execute("project-state", {
+    code: "stopifnot(is.function(load_input), is.function(data.table), !exists('design_only')); input_path",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(loaded.details.error, null);
+  assert.equal(loaded.details.value, "data/input.qs");
+  assert.equal(loaded.details.worker.environment, "project");
+  assert.equal(loaded.details.worker.started, true);
+  assert.ok(loaded.details.objects.some((object) => object.name === "input_path" && object.origin === "global"));
+  assert.ok(loaded.details.objects.some((object) => object.name === "load_input" && object.origin === "global"));
 });
 
 test("implementation mode commits only validated Approved Function body edits", async () => {
@@ -243,7 +400,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);
@@ -337,7 +494,7 @@ test("persisted workbench state resumes only when project and branch still match
   const resumed = harness(entries);
   const resumedContext = context(root, entries);
   await resumed.handlers.get("session_start")({ reason: "resume" }, resumedContext);
-  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose"]);
+  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset"]);
   await resumed.commands[0].options.handler("status", resumedContext);
   assert.match(resumedContext.notifications.at(-1)[0], /phase=design .*branch=pi-r\/workbench@/);
 

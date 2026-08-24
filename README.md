@@ -47,6 +47,8 @@ Confirmation writes the complete scaffold, creates one provenance commit, and en
 
 Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked names and signatures, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
 
+Both constrained phases expose bounded temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. See [Persistent sandboxed R exploration](docs/r-worker.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

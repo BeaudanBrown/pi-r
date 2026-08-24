@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.6.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.7.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -24,17 +24,18 @@
             cp ${./R/pi_r_runtime.R} $out/share/pi-r/R/pi_r_runtime.R
             cp ${./R/read_contract.R} $out/share/pi-r/R/read_contract.R
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
+            cp ${./R/worker.R} $out/share/pi-r/R/worker.R
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
           '';
 
           rRuntime = pkgs.rWrapper.override {
-            packages = [ pkgs.rPackages.jsonlite pkgs.rPackages.styler pkgs.rPackages.yaml ];
+            packages = with pkgs.rPackages; [ data_table jsonlite styler targets yaml ];
           };
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.6.0";
+            version = "0.7.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -56,7 +57,7 @@
               ln -s ${piResources}/share/pi-r $out/share/pi-r
               makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/pi-r \
                 --add-flags "$out/lib/pi-r/cli.mjs" \
-                --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.tree-sitter rRuntime ]}" \
+                --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bubblewrap pkgs.tree-sitter rRuntime ]}" \
                 --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
                 --set-default PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
                 --set-default PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
@@ -64,7 +65,10 @@
                 --set-default PI_R_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set-default PI_R_BASE_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set-default PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R" \
-                --set-default PI_R_CONTRACT_READER "${piResources}/share/pi-r/R/read_contract.R"
+                --set-default PI_R_CONTRACT_READER "${piResources}/share/pi-r/R/read_contract.R" \
+                --set-default PI_R_BWRAP "${pkgs.bubblewrap}/bin/bwrap" \
+                --set-default PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set-default PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R"
               runHook postInstall
             '';
 
@@ -93,11 +97,11 @@
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
           rTestRuntime = pkgs.rWrapper.override {
-            packages = with pkgs.rPackages; [ jsonlite styler yaml ];
+            packages = with pkgs.rPackages; [ data_table jsonlite styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.6.0" {
-            nativeBuildInputs = [ pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
+          verify = pkgs.runCommand "pi-r-verification-0.7.0" {
+            nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME" "$TMPDIR/extension"
@@ -123,6 +127,10 @@
               PI_R_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_BASE_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_FORMATTER_SCRIPT=${resources}/share/pi-r/R/style_body.R \
+              PI_R_BWRAP=${pkgs.bubblewrap}/bin/bwrap \
+              PI_R_WORKER_RSCRIPT=${rTestRuntime}/bin/Rscript \
+              PI_R_PROJECT_RSCRIPT=${rTestRuntime}/bin/Rscript \
+              PI_R_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
               node --test ${./tests/workbench-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \
