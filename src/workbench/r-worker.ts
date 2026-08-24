@@ -37,6 +37,8 @@ interface WorkerResponse {
   messages?: unknown;
   error?: unknown;
   objects?: unknown;
+  target?: unknown;
+  loaded?: unknown;
 }
 
 interface PendingRequest {
@@ -135,6 +137,35 @@ export class SandboxedRWorker {
       objects: objects(response.objects),
       worker: { environment, started, transientStateLost },
     };
+  }
+
+  async loadWorkspace(
+    target: string,
+    rscript: string,
+    signal?: AbortSignal,
+  ): Promise<{ target: string; loaded: string[]; objects: WorkerObject[]; worker: { started: boolean; transientStateLost: boolean } }> {
+    const started = await this.#ensureStarted("project", rscript);
+    const transientStateLost = this.#transientStateLost;
+    this.#transientStateLost = false;
+    const response = await this.#request({ operation: "workspace", target }, signal);
+    if (response.error && typeof response.error === "object") {
+      const error = response.error as { code?: unknown; message?: unknown };
+      throw new RecoverableError(
+        typeof error.code === "string" ? error.code : "TARGET_WORKSPACE_LOAD_FAILED",
+        typeof error.message === "string" ? error.message : "Failed target workspace could not be loaded",
+      );
+    }
+    return {
+      target: typeof response.target === "string" ? response.target : target,
+      loaded: stringArray(response.loaded),
+      objects: objects(response.objects),
+      worker: { started, transientStateLost },
+    };
+  }
+
+  async invalidateTargets(): Promise<void> {
+    if (!this.#child || this.#state !== "running") return;
+    await this.#request({ operation: "invalidate_targets" });
   }
 
   async status(): Promise<{ state: WorkerState; environment?: WorkerEnvironment; objects: WorkerObject[]; transientStateLost: boolean }> {

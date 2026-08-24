@@ -71,3 +71,11 @@ _Avoid_: REPL, R session
 **Transient State**:
 Non-durable assignments and explicitly loaded target objects held by the Persistent R Worker until reset, crash, lock, or shutdown.
 _Avoid_: Workspace, cache
+
+**Target Runner**:
+The separate bounded Bubblewrap process that lists or executes contracted targets without trusting Persistent R Worker state or gaining source mutation authority.
+_Avoid_: Shell, worker
+
+**Failed Target Workspace**:
+The `targets`-saved upstream state from one failed target, loadable only into Transient State for diagnosis.
+_Avoid_: Checkpoint, durable workspace

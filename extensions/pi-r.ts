@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
 import { validateContract } from "../src/contract/contract.js";
 import { renderScaffold } from "../src/contract/scaffold.js";
@@ -7,11 +7,13 @@ import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerState } from "../src/workbench/r-worker.js";
+import { listTargets, runTargets } from "../src/workbench/target-runner.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
+const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const EVALUATE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -22,6 +24,22 @@ const EVALUATE_SCHEMA = {
   },
 } as const;
 const EMPTY_SCHEMA = { type: "object", additionalProperties: false, properties: {} } as const;
+const TARGET_WORKSPACE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["target"],
+  properties: { target: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+} as const;
+const RUN_TARGETS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["names", "all"],
+  properties: {
+    names: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+    all: { type: "boolean" },
+    timeoutSeconds: { type: "integer", minimum: 1, maximum: 1800 },
+  },
+} as const;
 const INSPECT_TOOL = "r_function_inspect";
 const EDIT_TOOL = "r_function_edit";
 const INSPECT_SCHEMA = {
@@ -215,6 +233,19 @@ function contractSummary(contract: ProjectContract): string {
   return `Functions and signatures\n${functions}\n\nConstants\n${constants}\n\nDependencies\n${dependencies}\n\nTarget graph\n${graph}`;
 }
 
+async function canonicalDestination(path: string): Promise<string> {
+  let ancestor = dirname(path);
+  const missing = [basename(path)];
+  while (true) {
+    const canonical = await realpath(ancestor).catch(() => undefined);
+    if (canonical) return resolve(canonical, ...missing);
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error(`Cannot resolve output path: ${path}`);
+    missing.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+}
+
 async function sourceDiff(root: string, files: ReadonlyMap<string, string>): Promise<string> {
   const sections: string[] = [];
   for (const [path, generated] of files) {
@@ -235,6 +266,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let proposalRegistered = false;
   let editRegistered = false;
   let workerRegistered = false;
+  let targetRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
   let proposalQueue: Promise<void> = Promise.resolve();
@@ -260,7 +292,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
   function phaseTools(phase: Phase): string[] {
     const workerTools = workerRegistered ? [...WORKER_TOOLS] : [];
     if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools];
+    const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools];
     return safeReadTools();
   }
 
@@ -396,6 +429,139 @@ export default function piRExtension(pi: ExtensionAPI): void {
           showHud(context, state);
         }
         return { content: [{ type: "text", text: boundedJson({ ...reset, transientStateLost: reset.lostObjects > 0 }) }], details: reset };
+      },
+    });
+  }
+
+  function registerTargetTools(): void {
+    if (targetRegistered) return;
+    targetRegistered = true;
+    pi.registerTool({
+      name: "r_targets_list",
+      label: "List contracted R targets",
+      description: "List the locked target manifest and bounded freshness metadata using the read-only project runner.",
+      promptSnippet: "Inspect target freshness before requesting explicit target execution",
+      parameters: EMPTY_SCHEMA,
+      async execute(_toolCallId, _params, signal, _onUpdate, context) {
+        try {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Target listing requires Implementation Mode");
+          }
+          const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+          const runtime = await workerRuntime("project");
+          const result = await listTargets(contract.targets.map((target) => target.name), {
+            projectRoot: state.projectRoot,
+            readOnlyRoots: state.readOnlyRoots,
+            rscript: runtime,
+            runnerScript: process.env.PI_R_TARGET_RUNNER_SCRIPT ?? "",
+            bwrap: process.env.PI_R_BWRAP,
+          }, signal);
+          const details = {
+            ...result,
+            targets: result.targets.map((status) => {
+              const declaration = contract.targets.find((target) => target.name === status.name)!;
+              return {
+                ...status,
+                function: declaration.function,
+                artifact: declaration.artifact,
+                arguments: declaration.arguments,
+                pattern: declaration.pattern ?? null,
+              };
+            }),
+          };
+          return { content: [{ type: "text", text: boundedJson(details) }], details };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+    pi.registerTool({
+      name: "r_targets_run",
+      label: "Run contracted R targets",
+      description: "Run explicit locked target names, or deliberately run the full contract with all=true, in the controlled project runner.",
+      promptSnippet: "Run only necessary contracted targets; full-pipeline execution requires all=true",
+      parameters: RUN_TARGETS_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        try {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Target execution requires Implementation Mode");
+          }
+          const input = params as { names?: unknown; all?: unknown; timeoutSeconds?: unknown };
+          const requested = Array.isArray(input.names) ? input.names.filter((name): name is string => typeof name === "string") : [];
+          if (input.all !== true && requested.length === 0) {
+            throw new RecoverableError("TARGET_SELECTION_REQUIRED", "Specify at least one target name or deliberately set all=true");
+          }
+          if (input.all === true && requested.length > 0) {
+            throw new RecoverableError("AMBIGUOUS_TARGET_SELECTION", "Use either explicit target names or all=true, not both");
+          }
+          const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+          const contractNames = contract.targets.map((target) => target.name);
+          const names = input.all === true ? contractNames : requested;
+          const unknown = names.filter((name) => !contractNames.includes(name));
+          if (unknown.length) throw new RecoverableError("UNKNOWN_TARGET", `Targets are not declared in the locked contract: ${unknown.join(", ")}`, { targets: unknown });
+          const writableFiles: string[] = [];
+          for (const target of contract.targets.filter((candidate) => names.includes(candidate.name) && candidate.artifact === "file")) {
+            for (const [parameter, reference] of Object.entries(target.arguments)) {
+              if (!("constant" in reference) || !/(?:^|_)(?:output|file)?path$/i.test(parameter)) continue;
+              const value = contract.constants[reference.constant];
+              if (typeof value !== "string" || isAbsolute(value)) {
+                throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} requires a relative declared output path`);
+              }
+              const requestedOutput = resolve(state.projectRoot, value);
+              const output = await realpath(requestedOutput).catch(() => canonicalDestination(requestedOutput));
+              const rel = relative(state.projectRoot, output);
+              if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || [".git", ".pi", "_targets"].includes(rel.split(sep)[0])) {
+                throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} output escapes permitted runtime paths`);
+              }
+              const tracked = await git(["ls-files", "--error-unmatch", "--", rel], state.projectRoot, true);
+              if (tracked.code === 0) throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} cannot write tracked source: ${rel}`);
+              writableFiles.push(output);
+            }
+          }
+          const runtime = await workerRuntime("project");
+          const timeoutMs = typeof input.timeoutSeconds === "number" ? input.timeoutSeconds * 1000 : undefined;
+          const result = await runTargets(names, {
+            projectRoot: state.projectRoot,
+            readOnlyRoots: state.readOnlyRoots,
+            rscript: runtime,
+            runnerScript: process.env.PI_R_TARGET_RUNNER_SCRIPT ?? "",
+            bwrap: process.env.PI_R_BWRAP,
+            timeoutMs,
+            writableFiles: [...new Set(writableFiles)].sort(),
+          }, signal);
+          await worker?.invalidateTargets().catch(() => undefined);
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+    pi.registerTool({
+      name: "r_target_workspace",
+      label: "Load failed target workspace",
+      description: "Load one contracted failed target workspace into the persistent project worker for temporary diagnosis.",
+      promptSnippet: "After a failed target run, load its workspace before evaluating diagnostic expressions",
+      parameters: TARGET_WORKSPACE_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        try {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Failed target workspace diagnosis requires Implementation Mode");
+          }
+          const target = (params as { target?: unknown }).target;
+          if (typeof target !== "string") throw new RecoverableError("INVALID_REQUEST", "A canonical target name is required");
+          const runtime = await workerRuntime("project");
+          const result = await workerInstance().loadWorkspace(target, runtime, signal);
+          if (state) {
+            state = { ...state, workerState: worker?.state ?? "stopped" };
+            showHud(context, state);
+          }
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
       },
     });
   }
@@ -743,6 +909,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     }
     const implementation = await writeScaffoldCommit(contract, files);
     registerEditTool();
+    registerTargetTools();
     enterPhase(implementation);
     pi.appendEntry(STATE_ENTRY, implementation);
     showHud(context, implementation);
@@ -760,7 +927,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
       }
       registerWorkerTools();
       if (restored.phase === "design") registerProposalTool();
-      if (restored.phase === "implementation") registerEditTool();
+      if (restored.phase === "implementation") {
+        registerEditTool();
+        registerTargetTools();
+      }
       enterPhase({ ...restored, workerState: "stopped" });
       showHud(context, restored);
     } catch (error) {
@@ -784,6 +954,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     }
     if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
+    if ((TARGET_TOOLS as readonly string[]).includes(event.toolName) && state.phase === "implementation") return undefined;
     if ((event.toolName === INSPECT_TOOL || event.toolName === EDIT_TOOL) && state.phase === "implementation") return undefined;
     if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
@@ -804,7 +975,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools.";
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run.";
     const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,

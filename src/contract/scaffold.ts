@@ -68,7 +68,7 @@ function targetsFile(contract: ProjectContract): string {
     "",
     ...sources.map((path) => `source(${JSON.stringify(path)}, local = TRUE)`),
     "",
-    `tar_option_set(packages = c(${packages}))`,
+    `tar_option_set(packages = c(${packages}), workspace_on_error = TRUE)`,
     "",
     "list(",
     contract.targets.map((target) => targetExpression(target, contract)).join(",\n"),

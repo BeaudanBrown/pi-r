@@ -49,6 +49,8 @@ Implementation Mode exposes stale-safe Approved Function inspection and body rep
 
 Both constrained phases expose bounded temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. See [Persistent sandboxed R exploration](docs/r-worker.md).
 
+Implementation Mode can list and run only contracted targets through a separate controlled runner. Full-pipeline execution is explicit, complete logs remain local, failures return bounded target/traceback details, and saved failed workspaces can be loaded into temporary worker state. See [Controlled target operations](docs/target-operations.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

@@ -22,6 +22,33 @@ async function fixtureContract() {
   return JSON.parse(await readFile(join(output, "pi-r.yml"), "utf8"));
 }
 
+async function targetOperationsContract() {
+  const contract = await fixtureContract();
+  return {
+    ...contract,
+    dependencies: [],
+    constants: { seed: 41, output_path: "artifacts/answer.txt", source_path: "analysis.R" },
+    functions: [
+      { name: "write_answer", parameters: ["seed", "output_path"] },
+      { name: "fail_target", parameters: ["answer", "source_path"] },
+    ],
+    targets: [
+      {
+        name: "answer",
+        function: "write_answer",
+        artifact: "file",
+        arguments: { seed: { constant: "seed" }, output_path: { constant: "output_path" } },
+      },
+      {
+        name: "broken",
+        function: "fail_target",
+        artifact: "object",
+        arguments: { answer: { target: "answer" }, source_path: { constant: "source_path" } },
+      },
+    ],
+  };
+}
+
 async function git(cwd, ...args) {
   const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
   return result.stdout.trim();
@@ -293,7 +320,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -361,6 +388,104 @@ test("locking restarts exploration in the generated environment with canonical g
   assert.ok(loaded.details.objects.some((object) => object.name === "load_input" && object.origin === "global"));
 });
 
+test("implementation mode lists contracted targets with bounded freshness metadata", { timeout: 60_000 }, async (t) => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root, [], [true]);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const contract = await fixtureContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+
+  const listTargets = h.tools.find((tool) => tool.name === "r_targets_list");
+  assert.ok(listTargets, "Implementation Mode must expose bounded target listing");
+  const listed = await listTargets.execute("list-targets", {}, undefined, undefined, ctx);
+  assert.deepEqual(listed.details.targets.map((target) => target.name), contract.targets.map((target) => target.name));
+  assert.ok(listed.details.targets.every((target) => ["missing", "outdated", "current", "failed"].includes(target.freshness)));
+  assert.deepEqual(
+    listed.details.targets.map(({ function: producer, artifact }) => ({ producer, artifact })),
+    contract.targets.map((target) => ({ producer: target.function, artifact: target.artifact })),
+  );
+  assert.ok(listed.content[0].text.length <= 8192);
+  assert.match(listed.details.logPath, /[.]pi\/tmp\/pi-r-target-runs\//);
+  assert.match(await readFile(listed.details.logPath, "utf8"), /operation=list/);
+});
+
+test("target execution requires explicit contracted names and stores complete local logs", { timeout: 90_000 }, async (t) => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root, [], [true]);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const contract = await targetOperationsContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+  const runTargets = h.tools.find((tool) => tool.name === "r_targets_run");
+  assert.ok(runTargets, "Implementation Mode must expose controlled target execution");
+
+  await assert.rejects(
+    runTargets.execute("implicit-all", { names: [], all: false }, undefined, undefined, ctx),
+    /TARGET_SELECTION_REQUIRED/,
+  );
+  await assert.rejects(
+    runTargets.execute("unknown", { names: ["not_contracted"], all: false }, undefined, undefined, ctx),
+    /UNKNOWN_TARGET.*not_contracted/,
+  );
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(
+    runTargets.execute("cancelled", { names: ["answer"], all: false }, cancelled.signal, undefined, ctx),
+    /TARGET_RUNNER_CANCELLED/,
+  );
+
+  for (const [name, body] of [
+    ["write_answer", "{\nwriteLines(as.character(seed + 1L), output_path)\noutput_path\n}"],
+    ["fail_target", "{\ndiagnostic_value <- readLines(answer)\nwriteLines('mutated', source_path)\ndiagnostic_value\n}"],
+  ]) {
+    const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
+    const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
+    const inspected = await inspectTool.execute(`inspect-${name}`, { function: name }, undefined, undefined, ctx);
+    await editTool.execute(`edit-${name}`, {
+      function: name,
+      expectedSourceHash: inspected.details.sourceHash,
+      operation: { kind: "replace", body },
+    }, undefined, undefined, ctx);
+  }
+
+  const head = await git(root, "rev-parse", "HEAD");
+  const result = await runTargets.execute("run-answer", { names: ["answer"], all: false }, undefined, undefined, ctx);
+  assert.equal(result.details.status, "succeeded");
+  assert.deepEqual(result.details.requested, ["answer"]);
+  assert.equal(await readFile(join(root, "artifacts/answer.txt"), "utf8"), "42\n");
+  assert.match(await readFile(result.details.logPath, "utf8"), /operation=run[\s\S]*answer/);
+  const refreshed = await h.tools.find((tool) => tool.name === "r_targets_list")
+    .execute("list-after-run", {}, undefined, undefined, ctx);
+  assert.equal(refreshed.details.targets.find((target) => target.name === "answer").freshness, "current");
+  assert.equal(await git(root, "rev-parse", "HEAD"), head);
+  assert.equal(await git(root, "status", "--porcelain", "--untracked-files=no"), "");
+
+  const failed = await runTargets.execute("run-broken", { names: ["broken"], all: false }, undefined, undefined, ctx);
+  assert.equal(failed.details.status, "failed");
+  assert.equal(failed.details.error.code, "TARGET_RUN_FAILED");
+  assert.match(failed.details.error.target, /broken/);
+  assert.match(failed.details.error.message, /cannot open|read-only/i);
+  assert.ok(failed.details.error.traceback.length <= 2000);
+  assert.match(await readFile(failed.details.logPath, "utf8"), /operation=run[\s\S]*broken/);
+  assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 1\n");
+
+  const loadWorkspace = h.tools.find((tool) => tool.name === "r_target_workspace");
+  assert.ok(loadWorkspace, "Implementation Mode must expose failed target workspaces to the persistent worker");
+  const loaded = await loadWorkspace.execute("workspace", { target: "broken" }, undefined, undefined, ctx);
+  assert.equal(loaded.details.target, "broken");
+  assert.ok(loaded.details.objects.some((object) => object.name === "answer"), JSON.stringify(loaded.details));
+  const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
+    .execute("diagnose", { code: "readLines(answer)", targets: [] }, undefined, undefined, ctx);
+  assert.equal(evaluated.details.value, "42");
+});
+
 test("implementation mode commits only validated Approved Function body edits", async () => {
   const root = await repository();
   const h = harness();
@@ -400,7 +525,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);

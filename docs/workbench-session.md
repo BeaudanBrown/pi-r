@@ -34,4 +34,4 @@ The bounded HUD reports:
 - pending approval; and
 - R worker state.
 
-`/r status` also reports bounded worker object names and approximate sizes. See [Persistent sandboxed R exploration](r-worker.md) for worker lifecycle and loss reporting.
+`/r status` also reports bounded worker object names and approximate sizes. See [Persistent sandboxed R exploration](r-worker.md) for worker lifecycle and loss reporting. Implementation Mode additionally exposes [Controlled target operations](target-operations.md) through a separate runner that never trusts worker state.

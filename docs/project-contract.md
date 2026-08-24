@@ -11,6 +11,7 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 - Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
 - Target references must form an acyclic graph.
 - Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`; file artifacts generate `format = "file"`.
+- A controlled file target declares its exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects tracked paths and canonical path escapes.
 - Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
 - Contract, template, policy, and Nixpkgs revisions are pinned.
 
@@ -24,6 +25,8 @@ Generation writes these **Machine-Owned Files**:
 - `R/constants.R`
 - `flake.nix` and `flake.lock`
 - `.envrc` and `.gitignore`
+
+Generated pipelines enable `workspace_on_error`, allowing the controlled runner to retain failed target inputs for temporary diagnosis.
 
 Their complete contents must match the contract. Each approved function also gets one `R/<name>.R` file. Only its body is implementation-owned; all bytes outside that Tree-sitter body range remain contract-owned.
 

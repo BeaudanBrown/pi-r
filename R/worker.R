@@ -80,6 +80,44 @@ load_context <- function(target_names) {
   .pi_r_loaded_targets <<- target_names
 }
 
+handle_workspace <- function(request) {
+  conditions <- new.env(parent = emptyenv())
+  conditions$error <- NULL
+  before <- ls(.pi_r_session, all.names = TRUE)
+  tryCatch({
+    load_context(character())
+    workspace_call <- as.call(list(
+      targets::tar_workspace,
+      as.name(request$target),
+      envir = .pi_r_session,
+      packages = FALSE,
+      source = FALSE
+    ))
+    eval(workspace_call)
+  }, error = function(condition) {
+    conditions$error <- list(
+      code = "TARGET_WORKSPACE_LOAD_FAILED",
+      message = substr(conditionMessage(condition), 1L, 2000L),
+      recoverable = TRUE,
+      recovery = c("Run the failed target with r_targets_run", "Inspect the complete target-run log")
+    )
+  })
+  list(
+    target = request$target,
+    loaded = setdiff(ls(.pi_r_session, all.names = TRUE), before),
+    objects = object_inventory(),
+    error = conditions$error
+  )
+}
+
+invalidate_targets <- function() {
+  if (length(.pi_r_loaded_targets)) {
+    removable <- intersect(.pi_r_loaded_targets, ls(.pi_r_globals, all.names = TRUE))
+    if (length(removable)) rm(list = removable, envir = .pi_r_globals)
+  }
+  .pi_r_loaded_targets <<- character()
+}
+
 handle_evaluate <- function(request) {
   conditions <- new.env(parent = emptyenv())
   conditions$warnings <- character()
@@ -136,7 +174,12 @@ repeat {
     list(id = NULL, error = list(code = "INVALID_WORKER_REQUEST", message = conditionMessage(request), recoverable = TRUE))
   } else if (identical(request$operation, "evaluate")) {
     c(list(id = request$id), handle_evaluate(request))
+  } else if (identical(request$operation, "workspace")) {
+    c(list(id = request$id), handle_workspace(request))
   } else if (identical(request$operation, "status")) {
+    list(id = request$id, objects = object_inventory(), error = NULL)
+  } else if (identical(request$operation, "invalidate_targets")) {
+    invalidate_targets()
     list(id = request$id, objects = object_inventory(), error = NULL)
   } else if (identical(request$operation, "reset")) {
     clear_environment(.pi_r_session)

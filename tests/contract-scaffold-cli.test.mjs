@@ -91,6 +91,7 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
   assert.match(targets, /make_config\(threshold = PI_R_CONSTANTS\$threshold\), format = "qs"/);
   assert.match(targets, /format = "qs", pattern = map\(raw_data\)/);
   assert.match(targets, /format = "file", pattern = cross\(summaries, config\)/);
+  assert.match(targets, /tar_option_set\(packages = c\("data.table"\), workspace_on_error = TRUE\)/);
   assert.match(firstSnapshot["R/constants.R"], /input_path = "data\/input\.qs"[\s\S]*output_path = "artifacts\/report\.qs"[\s\S]*threshold = 0\.5/);
   assert.match(firstSnapshot["flake.nix"], /rPackages\."data_table"/);
   assert.match(firstSnapshot["flake.lock"], /b6018f87da91d19d0ab4cf979885689b469cdd41/);

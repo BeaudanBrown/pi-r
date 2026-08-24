@@ -167,6 +167,7 @@ export function validateContract(input: unknown): ProjectContract {
 
   const targetsInput = root.targets;
   if (!Array.isArray(targetsInput) || targetsInput.length === 0) invalid("targets must be a non-empty array");
+  if (targetsInput.length > 200) invalid("targets must contain at most 200 entries");
   const targets: TargetDefinition[] = targetsInput.map((entry, index) => {
     const path = `targets[${index}]`;
     const target = object(entry, path);
