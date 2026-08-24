@@ -6,10 +6,14 @@ import { fileURLToPath } from "node:url";
 import {
   VERSION,
   RecoverableError,
+  checkScaffold,
   createEditCandidate,
   errorEnvelope,
+  generateScaffold,
   inspectRFile,
+  readContract,
   resourcePaths,
+  summarizeContract,
 } from "./index.js";
 
 function printJson(value: unknown): void {
@@ -33,6 +37,34 @@ async function runRFunctions(args: string[]): Promise<void> {
       return;
     }
     process.stderr.write("Usage: pi-r r-functions inspect FILE | pi-r r-functions edit REQUEST.json\n");
+    process.exitCode = 2;
+  } catch (error) {
+    printJson(errorEnvelope(error));
+    process.exitCode = 1;
+  }
+}
+
+async function runContract(args: string[]): Promise<void> {
+  try {
+    if (args.length === 2 && args[0] === "validate") {
+      printJson({ ok: true, value: summarizeContract(await readContract(args[1])) });
+      return;
+    }
+    if (args.length === 3 && args[0] === "generate") {
+      const contract = await readContract(args[1]);
+      const files = await generateScaffold(contract, args[2]);
+      printJson({ ok: true, value: { output: resolve(args[2]), files } });
+      return;
+    }
+    if (args.length === 3 && args[0] === "check") {
+      const contract = await readContract(args[1]);
+      await checkScaffold(contract, args[2]);
+      printJson({ ok: true, value: { project: resolve(args[2]), drift: [] } });
+      return;
+    }
+    process.stderr.write(
+      "Usage: pi-r contract validate CONTRACT | pi-r contract <generate|check> CONTRACT PROJECT\n",
+    );
     process.exitCode = 2;
   } catch (error) {
     printJson(errorEnvelope(error));
@@ -70,8 +102,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (args[0] === "contract") {
+    await runContract(args.slice(1));
+    return;
+  }
+
   process.stderr.write(
-    "Usage: pi-r --version | pi-r paths [--json] | pi-r r-functions <inspect|edit> ...\n",
+    "Usage: pi-r --version | pi-r paths [--json] | pi-r r-functions ... | pi-r contract ...\n",
   );
   process.exitCode = 2;
 }

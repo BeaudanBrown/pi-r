@@ -1,0 +1,63 @@
+contractVersion: 1
+templateVersion: pi-r-template-v1
+policyVersion: pi-r-policy-v1
+project:
+  name: confidential-analysis
+  nixpkgs:
+    owner: NixOS
+    repo: nixpkgs
+    rev: b6018f87da91d19d0ab4cf979885689b469cdd41
+    narHash: sha256-twXPFqFsrrY5r28Zh7Homgcp2gUMBgQ6WDS98Q/3xFI=
+    lastModified: 1782847189
+dependencies:
+  - data.table
+constants:
+  input_path: data/input.qs
+  threshold: 0.5
+  output_path: artifacts/report.qs
+functions:
+  - name: load_input
+    parameters: [path]
+  - name: make_config
+    parameters: [threshold]
+  - name: summarise_groups
+    parameters: [input, config]
+  - name: write_result
+    parameters: [table, config, output_path]
+targets:
+  - name: raw_data
+    function: load_input
+    artifact: table
+    arguments:
+      path:
+        constant: input_path
+  - name: config
+    function: make_config
+    artifact: object
+    arguments:
+      threshold:
+        constant: threshold
+  - name: summaries
+    function: summarise_groups
+    artifact: table
+    arguments:
+      input:
+        target: raw_data
+      config:
+        target: config
+    pattern:
+      kind: map
+      over: [raw_data]
+  - name: report
+    function: write_result
+    artifact: file
+    arguments:
+      table:
+        target: summaries
+      config:
+        target: config
+      output_path:
+        constant: output_path
+    pattern:
+      kind: cross
+      over: [summaries, config]

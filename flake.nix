@@ -12,21 +12,23 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.2.0" { } ''
+          piResources = pkgs.runCommand "pi-r-resources-0.3.0" { } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
             cp ${./extensions/pi-r.ts} $out/share/pi-r/extensions/pi-r.ts
             cp ${./R/pi_r_runtime.R} $out/share/pi-r/R/pi_r_runtime.R
+            cp ${./R/read_contract.R} $out/share/pi-r/R/read_contract.R
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
+            cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
           '';
 
           rRuntime = pkgs.rWrapper.override {
-            packages = [ pkgs.rPackages.styler ];
+            packages = [ pkgs.rPackages.jsonlite pkgs.rPackages.styler pkgs.rPackages.yaml ];
           };
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.2.0";
+            version = "0.3.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -55,7 +57,8 @@
                 --set-default PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
                 --set-default PI_R_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set-default PI_R_BASE_RSCRIPT "${rRuntime}/bin/Rscript" \
-                --set-default PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R"
+                --set-default PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R" \
+                --set-default PI_R_CONTRACT_READER "${piResources}/share/pi-r/R/read_contract.R"
               runHook postInstall
             '';
 
@@ -84,8 +87,8 @@
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.2.0" {
-            nativeBuildInputs = [ pkgs.esbuild pkgs.nodejs_22 pkgs.R ];
+          verify = pkgs.runCommand "pi-r-verification-0.3.0" {
+            nativeBuildInputs = [ pkgs.esbuild pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME" "$TMPDIR/extension"
@@ -105,6 +108,9 @@
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \
               node --test ${./tests/scoped-edit-cli.test.mjs}
+            PI_R_CLI=${piR}/bin/pi-r \
+              PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
+              node --test ${./tests/contract-scaffold-cli.test.mjs}
             PI_R_HELPER=${resources}/share/pi-r/R/pi_r_runtime.R \
               Rscript --vanilla ${./tests/runtime-smoke.R}
 

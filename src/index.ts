@@ -1,13 +1,16 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export { readContract, summarizeContract, validateContract } from "./contract/contract.js";
+export { checkScaffold, generateScaffold, renderScaffold } from "./contract/scaffold.js";
+export type { ProjectContract, ContractSummary } from "./contract/types.js";
 export { createEditCandidate } from "./r-edit/scoped-edit.js";
 export { errorEnvelope, RecoverableError } from "./r-edit/errors.js";
 export type { StructuredError } from "./r-edit/errors.js";
 export { inspectRFile } from "./r-edit/tree-sitter.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export interface ResourcePaths {
   resources: string;

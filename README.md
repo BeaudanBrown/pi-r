@@ -58,6 +58,18 @@ nix run . -- r-functions edit request.json
 
 The command returns a formatted and validated candidate in a JSON envelope; it never writes the source file. See [the formatter evaluation](docs/formatter-evaluation.md) for the pinned formatting policy.
 
+## Contract-generated projects
+
+Validate a YAML Project Contract, generate a new locked project, or check an existing scaffold for drift:
+
+```console
+nix run . -- contract validate contract.yml
+nix run . -- contract generate contract.yml path/to/new-project
+nix run . -- contract check contract.yml path/to/project
+```
+
+Generation creates the complete minimal Nix/targets scaffold without overwriting an existing directory. See [the Project Contract reference](docs/project-contract.md) for its schema, semantic rules, generated ownership, artifact formats, and dynamic patterns.
+
 Enter the development environment and run the canonical gate:
 
 ```console
