@@ -14,6 +14,7 @@ test("the Pi extension registers only the inactive /r command", async () => {
     registerCommand(name, options) {
       commands.push({ name, options });
     },
+    on() {},
   });
 
   assert.equal(commands.length, 1);
@@ -23,5 +24,5 @@ test("the Pi extension registers only the inactive /r command", async () => {
   await commands[0].options.handler("status", {
     ui: { notify: (...args) => notifications.push(args) },
   });
-  assert.deepEqual(notifications, [["pi-r workbench is not active (requested: status)", "info"]]);
+  assert.deepEqual(notifications, [["pi-r workbench is not active", "info"]]);
 });

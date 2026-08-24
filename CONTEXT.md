@@ -27,3 +27,19 @@ _Avoid_: Static branching, iteration mode
 **Contract Drift**:
 A mismatch between the locked Project Contract and a Machine-Owned File or Approved Function signature.
 _Avoid_: Dirty file, customization
+
+**Workbench Session**:
+Session-local constrained state tied to one canonical working directory, Git repository, dedicated branch, and HEAD.
+_Avoid_: Workspace, environment
+
+**Design Mode**:
+The read-only Workbench Session phase in which only project-scoped and attached-root read/search tools are active.
+_Avoid_: Plan mode, safe mode
+
+**Read-Only Root**:
+A canonical project or user-attached path under which Design Mode may read or search.
+_Avoid_: Allowlist, mount
+
+**Current-State HUD**:
+The bounded status line showing phase, Git provenance, contract/policy state, editable scope count, approval state, and R worker state.
+_Avoid_: Dashboard, telemetry
