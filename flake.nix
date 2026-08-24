@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.5.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.6.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -34,7 +34,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.5.0";
+            version = "0.6.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -92,8 +92,11 @@
           pkgs = nixpkgs.legacyPackages.${system};
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
+          rTestRuntime = pkgs.rWrapper.override {
+            packages = with pkgs.rPackages; [ jsonlite styler yaml ];
+          };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.5.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.6.0" {
             nativeBuildInputs = [ pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -114,6 +117,12 @@
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
+              PI_R_TREE_SITTER=${pkgs.tree-sitter}/bin/tree-sitter \
+              PI_R_TREE_SITTER_R=${pkgs.tree-sitter-grammars.tree-sitter-r}/parser \
+              PI_R_TREE_SITTER_QUERY=${resources}/share/pi-r/resources/r-functions.scm \
+              PI_R_RSCRIPT=${rTestRuntime}/bin/Rscript \
+              PI_R_BASE_RSCRIPT=${rTestRuntime}/bin/Rscript \
+              PI_R_FORMATTER_SCRIPT=${resources}/share/pi-r/R/style_body.R \
               node --test ${./tests/workbench-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \

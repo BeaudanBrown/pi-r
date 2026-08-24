@@ -55,3 +55,11 @@ _Avoid_: Checkpoint, save
 **Implementation Mode**:
 The post-lock Workbench Session phase in which the Project Contract is immutable and only Approved Function bodies may become editable through scoped capabilities.
 _Avoid_: Coding mode, write mode
+
+**Scoped Mutation**:
+One stale-safe replacement or exact patch confined to an Approved Function body, validated before one provenance commit.
+_Avoid_: Edit, write
+
+**Source Digest**:
+The SHA-256 token returned by Approved Function inspection and required by a Scoped Mutation to reject stale source.
+_Avoid_: Version, checksum

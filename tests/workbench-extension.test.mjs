@@ -200,7 +200,129 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit"]);
+  assert.equal(await git(root, "status", "--porcelain"), "");
+});
+
+test("implementation mode commits only validated Approved Function body edits", async () => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root, [], [true]);
+  await h.commands[0].options.handler("start", ctx);
+  const contract = await fixtureContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+  const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
+  const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
+  assert.ok(inspectTool, "Implementation Mode must expose Approved Function inspection");
+  assert.ok(editTool, "Implementation Mode must expose its scoped body editing capability");
+  const path = join(root, "R/load_input.R");
+  const inspected = await inspectTool.execute("inspect-1", { function: "load_input" }, undefined, undefined, ctx);
+  assert.match(inspected.content[0].text, /load_input <- function\(path\)[\s\S]*Source-Hash: sha256:/);
+  const headBefore = await git(root, "rev-parse", "HEAD");
+
+  const result = await editTool.execute("edit-1", {
+    function: "load_input",
+    expectedSourceHash: inspected.details.sourceHash,
+    operation: {
+      kind: "replace",
+      body: "{\n  identity_local <- function(value) value\n  lapply(list(path), function(item) identity_local(item))[[1]]\n}",
+    },
+  }, undefined, undefined, ctx);
+
+  assert.equal(await git(root, "rev-list", "--count", `${headBefore}..HEAD`), "1");
+  const committed = await readFile(path, "utf8");
+  assert.match(committed, /^load_input <- function\(path\)/);
+  assert.match(committed, /identity_local <- function/);
+  assert.match(committed, /function\(item\)/);
+  assert.match(result.content[0].text, /Formatted diff[\s\S]*Commit: [0-9a-f]{40}/);
+  assert.equal(result.details.commitHash, await git(root, "rev-parse", "HEAD"));
+  assert.equal(h.appended.at(-1).data.head, result.details.commitHash);
+  assert.match(
+    await git(root, "log", "-1", "--format=%B"),
+    /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
+  );
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit"]);
+  const gate = h.handlers.get("tool_call");
+  assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
+  assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);
+
+  const patchInspection = await inspectTool.execute("inspect-2", { function: "load_input" }, undefined, undefined, ctx);
+  const patchHead = await git(root, "rev-parse", "HEAD");
+  await editTool.execute("edit-2", {
+    function: "load_input",
+    expectedSourceHash: patchInspection.details.sourceHash,
+    operation: { kind: "patch", oldText: "identity_local(item)", newText: "toupper(identity_local(item))" },
+  }, undefined, undefined, ctx);
+  assert.equal(await git(root, "rev-list", "--count", `${patchHead}..HEAD`), "1");
+  assert.match(await readFile(path, "utf8"), /toupper\(identity_local\(item\)\)/);
+  assert.equal(await git(root, "status", "--porcelain"), "");
+});
+
+test("policy, syntax, formatter, stale-content, and scope failures do not mutate or commit", async () => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root, [], [true]);
+  await h.commands[0].options.handler("start", ctx);
+  const contract = await fixtureContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+  const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
+  const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
+  const path = join(root, "R/load_input.R");
+  const original = await readFile(path, "utf8");
+  const digest = (await inspectTool.execute("inspect", { function: "load_input" }, undefined, undefined, ctx)).details.sourceHash;
+  const head = await git(root, "rev-parse", "HEAD");
+  const forbiddenBodies = [
+    ["library(pkg)", /POLICY_VIOLATION.*library/],
+    ["install.packages(\"pkg\")", /POLICY_VIOLATION.*install\.packages/],
+    ["source(\"other.R\")", /POLICY_VIOLATION.*source/],
+    ["setwd(\"..\")", /POLICY_VIOLATION.*setwd/],
+    ["base::mean(1)", /POLICY_VIOLATION.*namespace-operator/],
+    ["data.frame(value = 1)", /POLICY_VIOLATION.*data\.frame/],
+    ["tibble(value = 1)", /POLICY_VIOLATION.*tibble/],
+    ["as.data.frame(list(value = 1))", /POLICY_VIOLATION.*as\.data\.frame/],
+    ["do.call(\"library\", list(\"pkg\"))", /POLICY_VIOLATION.*do\.call/],
+    ["loader <- library\nloader(\"pkg\")", /POLICY_VIOLATION.*library/],
+  ];
+  for (const [expression, expected] of forbiddenBodies) {
+    await assert.rejects(editTool.execute("forbidden", {
+      function: "load_input",
+      expectedSourceHash: digest,
+      operation: { kind: "replace", body: `{\n${expression}\n}` },
+    }, undefined, undefined, ctx), expected);
+  }
+  await assert.rejects(editTool.execute("stale", {
+    function: "load_input",
+    expectedSourceHash: `sha256:${"0".repeat(64)}`,
+    operation: { kind: "replace", body: "{\npath\n}" },
+  }, undefined, undefined, ctx), /STALE_CONTENT/);
+  await assert.rejects(editTool.execute("scope", {
+    function: "not_approved",
+    expectedSourceHash: digest,
+    operation: { kind: "replace", body: "{\nNULL\n}" },
+  }, undefined, undefined, ctx), /SCOPE_VIOLATION/);
+  await assert.rejects(editTool.execute("syntax", {
+    function: "load_input",
+    expectedSourceHash: digest,
+    operation: { kind: "replace", body: "{\nif (\n}" },
+  }, undefined, undefined, ctx), /INVALID_R_SYNTAX/);
+  const formatter = process.env.PI_R_FORMATTER_SCRIPT;
+  process.env.PI_R_FORMATTER_SCRIPT = join(root, "missing-formatter.R");
+  try {
+    await assert.rejects(editTool.execute("formatter", {
+      function: "load_input",
+      expectedSourceHash: digest,
+      operation: { kind: "replace", body: "{\npath\n}" },
+    }, undefined, undefined, ctx), /FORMATTER_FAILURE/);
+  } finally {
+    process.env.PI_R_FORMATTER_SCRIPT = formatter;
+  }
+
+  assert.equal(await readFile(path, "utf8"), original);
+  assert.equal(await git(root, "rev-parse", "HEAD"), head);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 

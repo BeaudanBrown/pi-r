@@ -45,6 +45,8 @@ After iterating on one ignored, machine-managed Project Contract draft, review a
 
 Confirmation writes the complete scaffold, creates one provenance commit, and enters Implementation Mode. See [Project Contract design and lock](docs/design-lock.md).
 
+Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked names and signatures, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

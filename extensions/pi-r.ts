@@ -4,10 +4,49 @@ import contractSchema from "../resources/project-contract.schema.json" with { ty
 import { validateContract } from "../src/contract/contract.js";
 import { renderScaffold } from "../src/contract/scaffold.js";
 import type { ProjectContract } from "../src/contract/types.js";
+import { RecoverableError } from "../src/r-edit/errors.js";
+import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
+const INSPECT_TOOL = "r_function_inspect";
+const EDIT_TOOL = "r_function_edit";
+const INSPECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["function"],
+  properties: { function: { type: "string", minLength: 1 } },
+} as const;
+const EDIT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["function", "expectedSourceHash", "operation"],
+  properties: {
+    function: { type: "string", minLength: 1 },
+    expectedSourceHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+    operation: {
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "body"],
+          properties: { kind: { const: "replace" }, body: { type: "string" } },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "oldText", "newText"],
+          properties: {
+            kind: { const: "patch" },
+            oldText: { type: "string", minLength: 1 },
+            newText: { type: "string" },
+          },
+        },
+      ],
+    },
+  },
+} as const;
 
 type NoticeLevel = "info" | "warning" | "error";
 type Phase = "design" | "implementation";
@@ -182,7 +221,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let state: WorkbenchState | undefined;
   let previousActiveTools: string[] | undefined;
   let proposalRegistered = false;
+  let editRegistered = false;
   let proposalQueue: Promise<void> = Promise.resolve();
+  let editQueue: Promise<void> = Promise.resolve();
 
   async function git(args: string[], cwd: string, allowFailure = false): Promise<ExecResult> {
     const result = await pi.exec("git", args, { cwd, timeout: 10_000 });
@@ -201,9 +242,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   function phaseTools(phase: Phase): string[] {
-    return phase === "design" && proposalRegistered
-      ? [...safeReadTools(), "r_contract_propose"]
-      : safeReadTools();
+    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose"];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL];
+    return safeReadTools();
   }
 
   function enterPhase(next: WorkbenchState): void {
@@ -252,6 +293,119 @@ export default function piRExtension(pi: ExtensionAPI): void {
         });
         proposalQueue = operation.then(() => undefined, () => undefined);
         return operation;
+      },
+    });
+  }
+
+  async function applyScopedEdit(params: unknown, context: CommandContext): Promise<unknown> {
+    if (!state || state.phase !== "implementation") {
+      throw new RecoverableError("INVALID_PHASE", "Approved Function edits require active Implementation Mode");
+    }
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
+    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+    if (dirty.stdout.trim()) {
+      throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside the scoped edit capability");
+    }
+    const prepared = await prepareScopedMutation(state.projectRoot, params);
+    const destination = resolve(state.projectRoot, prepared.path);
+    if ((await readFile(destination, "utf8")) !== prepared.original) {
+      throw new RecoverableError("STALE_CONTENT", "Approved Function file changed before commit");
+    }
+    const temporary = `${destination}.pi-r-edit-tmp`;
+    try {
+      await writeFile(temporary, prepared.candidate, "utf8");
+      await rename(temporary, destination);
+      await git(["add", "--", prepared.path], state.projectRoot);
+      await git(
+        [
+          "commit",
+          "-m",
+          `Implement Approved Function ${prepared.function}`,
+          "-m",
+          `Capability: ${prepared.capabilityVersion}\nContract-Hash: ${prepared.contractHash}\nContract-Version: ${prepared.contractVersion}\nPolicy-Version: ${prepared.policyVersion}`,
+          "--",
+          prepared.path,
+        ],
+        state.projectRoot,
+      );
+    } catch (error) {
+      await rm(temporary, { force: true });
+      await git(["reset", "--quiet", "HEAD", "--", prepared.path], state.projectRoot, true);
+      await writeFile(destination, prepared.original, "utf8");
+      throw error;
+    }
+    const commitHash = (await git(["rev-parse", "HEAD"], state.projectRoot)).stdout.trim();
+    const next = { ...state, head: commitHash, allowedTools: phaseTools("implementation") };
+    enterPhase(next);
+    pi.appendEntry(STATE_ENTRY, next);
+    showHud(context, next);
+    const diff = prepared.diff.length <= 40_000
+      ? prepared.diff
+      : `${prepared.diff.slice(0, 40_000)}\n[formatted diff truncated]`;
+    return {
+      content: [{ type: "text", text: `Formatted diff\n${diff}\n\nCommit: ${commitHash}` }],
+      details: { commitHash, diff, function: prepared.function, path: prepared.path },
+    };
+  }
+
+  function actionableToolError(error: unknown): Error {
+    if (error instanceof RecoverableError) {
+      const details = error.structured.details ? ` ${JSON.stringify(error.structured.details)}` : "";
+      return new Error(`${error.structured.code}: ${error.message}${details}`);
+    }
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  function registerEditTool(): void {
+    if (editRegistered) return;
+    editRegistered = true;
+    pi.registerTool({
+      name: INSPECT_TOOL,
+      label: "Inspect Approved R function",
+      description: "Read one Approved Function with its signature and current source digest for a stale-safe scoped edit.",
+      promptSnippet: "Inspect an Approved Function immediately before calling r_function_edit with the returned sourceHash",
+      parameters: INSPECT_SCHEMA,
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
+        const operation = editQueue.then(async () => {
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Approved Function inspection requires Implementation Mode");
+          }
+          const mismatch = await verifyState(state, context);
+          if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
+          const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+          if (dirty.stdout.trim()) {
+            throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
+          }
+          const input = params as { function?: unknown };
+          return inspectApprovedFunction(state.projectRoot, input?.function);
+        });
+        editQueue = operation.then(() => undefined, () => undefined);
+        try {
+          const inspection = await operation;
+          return {
+            content: [{ type: "text", text: `${inspection.signature}\nSource-Hash: ${inspection.sourceHash}\n\n${inspection.source}` }],
+            details: inspection,
+          };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+    pi.registerTool({
+      name: EDIT_TOOL,
+      label: "Edit Approved R function body",
+      description: "Replace or exact-patch one contract-approved function body, validate it, and create one provenance commit.",
+      promptSnippet: "Edit only Approved Function bodies using a current sha256 source digest; no path or general write authority is accepted",
+      parameters: EDIT_SCHEMA,
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
+        const operation = editQueue.then(() => applyScopedEdit(params, context));
+        editQueue = operation.then(() => undefined, () => undefined);
+        try {
+          return await operation;
+        } catch (error) {
+          throw actionableToolError(error);
+        }
       },
     });
   }
@@ -425,6 +579,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       return;
     }
     const implementation = await writeScaffoldCommit(contract, files);
+    registerEditTool();
     enterPhase(implementation);
     pi.appendEntry(STATE_ENTRY, implementation);
     showHud(context, implementation);
@@ -441,6 +596,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return;
       }
       if (restored.phase === "design") registerProposalTool();
+      if (restored.phase === "implementation") registerEditTool();
       enterPhase(restored);
       showHud(context, restored);
     } catch (error) {
@@ -461,6 +617,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       return { block: true, reason: `pi-r ${state.phase} mode blocks this tool` };
     }
     if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
+    if ((event.toolName === INSPECT_TOOL || event.toolName === EDIT_TOOL) && state.phase === "implementation") return undefined;
     if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
     }
