@@ -51,6 +51,8 @@ Both constrained phases expose bounded temporary exploration through a lazy, per
 
 Implementation Mode can list and run only contracted targets through a separate controlled runner. Full-pipeline execution is explicit, complete logs remain local, failures return bounded target/traceback details, and saved failed workspaces can be loaded into temporary worker state. See [Controlled target operations](docs/target-operations.md).
 
+A general target-backed inspector reports bounded table, object, and file structure without returning table rows or object values. Optional summaries, stable availability errors, and metadata-hash cache invalidation keep repeated inspection concise. See [Target-backed artifact inspection](docs/artifact-inspection.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

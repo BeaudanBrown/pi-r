@@ -8,34 +8,45 @@ import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerState } from "../src/workbench/r-worker.js";
 import { listTargets, runTargets } from "../src/workbench/target-runner.js";
+import { inspectArtifact, type ArtifactFacet } from "../src/workbench/artifact-inspector.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
+const ARTIFACT_TOOL = "r_artifact_inspect";
 const EVALUATE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["code", "targets"],
   properties: {
     code: { type: "string", minLength: 1, maxLength: 50_000 },
-    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
   },
 } as const;
 const EMPTY_SCHEMA = { type: "object", additionalProperties: false, properties: {} } as const;
+const ARTIFACT_INSPECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["target", "facets"],
+  properties: {
+    target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" },
+    facets: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["structure", "summary"] } },
+  },
+} as const;
 const TARGET_WORKSPACE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["target"],
-  properties: { target: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+  properties: { target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
 } as const;
 const RUN_TARGETS_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["names", "all"],
   properties: {
-    names: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._]*$" } },
+    names: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
     all: { type: "boolean" },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: 1800 },
   },
@@ -267,6 +278,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let editRegistered = false;
   let workerRegistered = false;
   let targetRegistered = false;
+  let artifactRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
   let proposalQueue: Promise<void> = Promise.resolve();
@@ -293,7 +305,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const workerTools = workerRegistered ? [...WORKER_TOOLS] : [];
     if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools];
     const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools];
+    const artifactTools = artifactRegistered ? [ARTIFACT_TOOL] : [];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools];
     return safeReadTools();
   }
 
@@ -558,6 +571,48 @@ export default function piRExtension(pi: ExtensionAPI): void {
             state = { ...state, workerState: worker?.state ?? "stopped" };
             showHud(context, state);
           }
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+  }
+
+  function registerArtifactTool(): void {
+    if (artifactRegistered) return;
+    artifactRegistered = true;
+    pi.registerTool({
+      name: ARTIFACT_TOOL,
+      label: "Inspect target-backed artifact",
+      description: "Inspect bounded structure and optional summaries for one current contracted table, object, or file target without returning rows by default.",
+      promptSnippet: "Inspect artifact structure before loading raw values; request summary only when needed",
+      parameters: ARTIFACT_INSPECT_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        try {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Artifact inspection requires Implementation Mode");
+          }
+          const input = params as { target?: unknown; facets?: unknown };
+          if (typeof input.target !== "string" || !Array.isArray(input.facets)) {
+            throw new RecoverableError("INVALID_REQUEST", "Artifact inspection requires a target and requested facets");
+          }
+          const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+          const target = contract.targets.find((candidate) => candidate.name === input.target);
+          if (!target) throw new RecoverableError("UNKNOWN_TARGET", `Target is not declared in the locked contract: ${input.target}`, { target: input.target });
+          const facets = input.facets.filter((facet): facet is ArtifactFacet => facet === "structure" || facet === "summary");
+          if (facets.length === 0 || facets.length !== input.facets.length || new Set(facets).size !== facets.length) {
+            throw new RecoverableError("INVALID_REQUEST", "Artifact facets must be unique structure or summary values");
+          }
+          const runtime = await workerRuntime("project");
+          const result = await inspectArtifact(target, facets, {
+            projectRoot: state.projectRoot,
+            readOnlyRoots: state.readOnlyRoots,
+            rscript: runtime,
+            inspectorScript: process.env.PI_R_ARTIFACT_INSPECTOR_SCRIPT ?? "",
+            bwrap: process.env.PI_R_BWRAP,
+          }, signal);
           return { content: [{ type: "text", text: boundedJson(result) }], details: result };
         } catch (error) {
           throw actionableToolError(error);
@@ -910,6 +965,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const implementation = await writeScaffoldCommit(contract, files);
     registerEditTool();
     registerTargetTools();
+    registerArtifactTool();
     enterPhase(implementation);
     pi.appendEntry(STATE_ENTRY, implementation);
     showHud(context, implementation);
@@ -930,6 +986,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       if (restored.phase === "implementation") {
         registerEditTool();
         registerTargetTools();
+        registerArtifactTool();
       }
       enterPhase({ ...restored, workerState: "stopped" });
       showHud(context, restored);
@@ -955,6 +1012,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
     if ((TARGET_TOOLS as readonly string[]).includes(event.toolName) && state.phase === "implementation") return undefined;
+    if (event.toolName === ARTIFACT_TOOL && state.phase === "implementation") return undefined;
     if ((event.toolName === INSPECT_TOOL || event.toolName === EDIT_TOOL) && state.phase === "implementation") return undefined;
     if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
@@ -975,7 +1033,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run.";
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values.";
     const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,

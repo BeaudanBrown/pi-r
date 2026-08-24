@@ -58,6 +58,7 @@ function string(value: unknown, path: string): string {
 
 function rName(value: unknown, path: string): string {
   const name = string(value, path);
+  if (name.length > 100) invalid(`${path} must contain at most 100 characters`);
   if (!R_NAME.test(name) || R_RESERVED.has(name) || /^\.\.[0-9]+$/.test(name)) {
     invalid(`${path} must be a non-reserved R name`);
   }

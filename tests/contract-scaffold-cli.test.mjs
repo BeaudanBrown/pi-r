@@ -94,6 +94,8 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
   assert.match(targets, /tar_option_set\(packages = c\("data.table"\), workspace_on_error = TRUE\)/);
   assert.match(firstSnapshot["R/constants.R"], /input_path = "data\/input\.qs"[\s\S]*output_path = "artifacts\/report\.qs"[\s\S]*threshold = 0\.5/);
   assert.match(firstSnapshot["flake.nix"], /rPackages\."data_table"/);
+  assert.match(firstSnapshot["flake.nix"], /rPackages\."qs2"/);
+  assert.doesNotMatch(firstSnapshot["flake.nix"], /rPackages\."qs"/);
   assert.match(firstSnapshot["flake.lock"], /b6018f87da91d19d0ab4cf979885689b469cdd41/);
   assert.equal(firstSnapshot[".envrc"], "use flake\n");
 
@@ -113,7 +115,7 @@ test("contract checking detects machine-owned drift but permits function body im
 
   const functionPath = join(output, "R", "load_input.R");
   const functionSource = await readFile(functionPath, "utf8");
-  await writeFile(functionPath, functionSource.replace('stop("Not implemented: load_input", call. = FALSE)', "qs::qread(path)"));
+  await writeFile(functionPath, functionSource.replace('stop("Not implemented: load_input", call. = FALSE)', "qs_read(path)"));
   assert.equal((await run(["contract", "check", contract, output])).code, 0);
 
   const targetsPath = join(output, "_targets.R");

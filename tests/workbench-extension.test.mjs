@@ -49,6 +49,75 @@ async function targetOperationsContract() {
   };
 }
 
+async function tableArtifactProject() {
+  const root = await repository();
+  const contract = await fixtureContract();
+  const tableContract = {
+    ...contract,
+    dependencies: ["data.table"],
+    constants: { seed: 10 },
+    functions: [
+      { name: "make_table", parameters: ["seed"] },
+      { name: "make_object", parameters: ["seed"] },
+    ],
+    targets: [
+      {
+        name: "sample_table",
+        function: "make_table",
+        artifact: "table",
+        arguments: { seed: { constant: "seed" } },
+      },
+      {
+        name: "sample_object",
+        function: "make_object",
+        artifact: "object",
+        arguments: { seed: { constant: "seed" } },
+      },
+    ],
+  };
+  const staging = await mkdtemp(join(tmpdir(), "pi-r-table-project-"));
+  const contractPath = join(staging, "contract.json");
+  const generated = join(staging, "generated");
+  await writeFile(contractPath, `${JSON.stringify(tableContract, null, 2)}\n`);
+  await execFileAsync(cli, ["contract", "generate", contractPath, generated]);
+  await execFileAsync("cp", ["-R", `${generated}/.`, root]);
+  await writeFile(join(root, "R/make_table.R"), [
+    "make_table <- function(seed) {",
+    "  result <- data.table(value = c(seed, seed + 1L), group = c('a', 'b'))",
+    "  setkey(result, value)",
+    "  result",
+    "}",
+    "",
+  ].join("\n"));
+  await writeFile(join(root, "R/make_object.R"), [
+    "make_object <- function(seed) {",
+    "  list(value = seed, label = 'bounded')",
+    "}",
+    "",
+  ].join("\n"));
+  await git(root, "add", "-A");
+  await git(root, "commit", "-qm", "add table artifact fixture");
+  await git(root, "switch", "-qc", "pi-r/workbench");
+  await execFileAsync(process.env.PI_R_WORKER_RSCRIPT, ["--vanilla", "-e", "targets::tar_make(reporter = 'silent', callr_function = NULL)"], { cwd: root, timeout: 30_000 });
+  const head = await git(root, "rev-parse", "HEAD");
+  const state = {
+    version: 1,
+    phase: "implementation",
+    projectRoot: root,
+    workingDirectory: root,
+    branch: "pi-r/workbench",
+    head,
+    contractState: "present",
+    policyState: "pi-r-policy-v1",
+    editableScopeCount: 2,
+    pendingApproval: "none",
+    workerState: "stopped",
+    readOnlyRoots: [],
+    allowedTools: [],
+  };
+  return { root, tableContract, entries: [{ type: "custom", customType: "pi-r-workbench-state", data: state }] };
+}
+
 async function git(cwd, ...args) {
   const result = await execFileAsync("git", args, { cwd, encoding: "utf8" });
   return result.stdout.trim();
@@ -320,7 +389,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -329,7 +398,7 @@ test("evaluate_r loads only explicitly requested targets under canonical names",
   await writeFile(join(root, "_targets.R"), [
     "library(targets)",
     "global_value <- 7L",
-    "list(tar_target(sample_target, global_value * 6L, format = 'rds'))",
+    "list(tar_target(sample_target, global_value * 6L, format = 'qs'))",
     "",
   ].join("\n"));
   await git(root, "add", "_targets.R");
@@ -425,6 +494,12 @@ test("target execution requires explicit contracted names and stores complete lo
   await h.commands[0].options.handler("lock", ctx);
   const runTargets = h.tools.find((tool) => tool.name === "r_targets_run");
   assert.ok(runTargets, "Implementation Mode must expose controlled target execution");
+  const inspectArtifact = h.tools.find((tool) => tool.name === "r_artifact_inspect");
+  assert.ok(inspectArtifact, "Implementation Mode must expose general target-backed artifact inspection");
+  const missingArtifact = await inspectArtifact.execute("inspect-missing", { target: "answer", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(missingArtifact.details.status, "missing");
+  assert.equal(missingArtifact.details.error.code, "MISSING_TARGET");
+  assert.deepEqual(missingArtifact.details.error.recovery, ["Run r_targets_run for the target"]);
 
   await assert.rejects(
     runTargets.execute("implicit-all", { names: [], all: false }, undefined, undefined, ctx),
@@ -464,8 +539,41 @@ test("target execution requires explicit contracted names and stores complete lo
   const refreshed = await h.tools.find((tool) => tool.name === "r_targets_list")
     .execute("list-after-run", {}, undefined, undefined, ctx);
   assert.equal(refreshed.details.targets.find((target) => target.name === "answer").freshness, "current");
+  const inspected = await inspectArtifact.execute("inspect-answer", { target: "answer", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(inspected.details.identity.target, "answer");
+  assert.equal(inspected.details.kind, "file");
+  assert.equal(inspected.details.producer.function, "write_answer");
+  assert.equal(inspected.details.status, "current");
+  assert.deepEqual(inspected.details.facets, ["structure"]);
+  assert.equal(inspected.details.structure.exists, true);
+  assert.equal(inspected.details.cache.hit, false);
+  assert.equal(inspected.details.error, null);
+  assert.ok(inspected.content[0].text.length <= 8192);
+  const cached = await inspectArtifact.execute("inspect-answer-cached", { target: "answer", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(cached.details.cache.hit, true);
+  assert.equal(cached.details.identity.metadataHash, inspected.details.identity.metadataHash);
   assert.equal(await git(root, "rev-parse", "HEAD"), head);
   assert.equal(await git(root, "status", "--porcelain", "--untracked-files=no"), "");
+
+  const functionInspection = await h.tools.find((tool) => tool.name === "r_function_inspect")
+    .execute("inspect-write-answer-revision", { function: "write_answer" }, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_function_edit").execute("revise-write-answer", {
+    function: "write_answer",
+    expectedSourceHash: functionInspection.details.sourceHash,
+    operation: { kind: "replace", body: "{\nwriteLines(as.character(seed + 2L), output_path)\noutput_path\n}" },
+  }, undefined, undefined, ctx);
+  const revisedHead = await git(root, "rev-parse", "HEAD");
+  const staleArtifact = await inspectArtifact.execute("inspect-stale", { target: "answer", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(staleArtifact.details.status, "stale");
+  assert.equal(staleArtifact.details.error.code, "STALE_TARGET");
+  assert.deepEqual(staleArtifact.details.error.recovery, ["Run r_targets_run for the target"]);
+  await runTargets.execute("rerun-answer", { names: ["answer"], all: false }, undefined, undefined, ctx);
+  assert.equal(await readFile(join(root, "artifacts/answer.txt"), "utf8"), "43\n");
+  const invalidated = await inspectArtifact.execute("inspect-invalidated", { target: "answer", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(invalidated.details.status, "current");
+  assert.equal(invalidated.details.cache.hit, false);
+  assert.notEqual(invalidated.details.identity.metadataHash, inspected.details.identity.metadataHash);
+  assert.equal(await git(root, "rev-parse", "HEAD"), revisedHead);
 
   const failed = await runTargets.execute("run-broken", { names: ["broken"], all: false }, undefined, undefined, ctx);
   assert.equal(failed.details.status, "failed");
@@ -475,6 +583,10 @@ test("target execution requires explicit contracted names and stores complete lo
   assert.ok(failed.details.error.traceback.length <= 2000);
   assert.match(await readFile(failed.details.logPath, "utf8"), /operation=run[\s\S]*broken/);
   assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 1\n");
+  const failedArtifact = await inspectArtifact.execute("inspect-broken", { target: "broken", facets: ["structure"] }, undefined, undefined, ctx);
+  assert.equal(failedArtifact.details.status, "failed");
+  assert.equal(failedArtifact.details.error.code, "FAILED_TARGET");
+  assert.deepEqual(failedArtifact.details.error.recovery, ["Run r_targets_run for the target", "Load its failed workspace with r_target_workspace"]);
 
   const loadWorkspace = h.tools.find((tool) => tool.name === "r_target_workspace");
   assert.ok(loadWorkspace, "Implementation Mode must expose failed target workspaces to the persistent worker");
@@ -483,7 +595,69 @@ test("target execution requires explicit contracted names and stores complete lo
   assert.ok(loaded.details.objects.some((object) => object.name === "answer"), JSON.stringify(loaded.details));
   const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
     .execute("diagnose", { code: "readLines(answer)", targets: [] }, undefined, undefined, ctx);
-  assert.equal(evaluated.details.value, "42");
+  assert.equal(evaluated.details.value, "43");
+});
+
+test("table artifact inspection returns structure and summaries without rows and warns on kind mismatch", { timeout: 120_000 }, async (t) => {
+  const { root, entries } = await tableArtifactProject();
+  const h = harness(entries);
+  const ctx = context(root, entries);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.handlers.get("session_start")({ reason: "resume" }, ctx);
+  const inspectArtifact = h.tools.find((tool) => tool.name === "r_artifact_inspect");
+  const inspected = await inspectArtifact.execute("inspect-table", {
+    target: "sample_table",
+    facets: ["structure", "summary"],
+  }, undefined, undefined, ctx);
+
+  assert.equal(inspected.details.status, "current");
+  assert.equal(inspected.details.kind, "table");
+  assert.deepEqual(inspected.details.structure.dimensions, [2, 2]);
+  assert.deepEqual(inspected.details.structure.columns, [
+    { name: "value", type: "numeric" },
+    { name: "group", type: "character" },
+  ]);
+  assert.deepEqual(inspected.details.structure.keys, ["value"]);
+  assert.deepEqual(inspected.details.summaries[0], {
+    name: "value", type: "numeric", missing: 0, minimum: 10, maximum: 11, mean: 10.5,
+  });
+  assert.equal("rows" in inspected.details.structure, false);
+  assert.doesNotMatch(inspected.content[0].text, /\"a\"|\"b\"/);
+  assert.deepEqual(inspected.details.warnings, []);
+  const object = await inspectArtifact.execute("inspect-object", {
+    target: "sample_object",
+    facets: ["structure"],
+  }, undefined, undefined, ctx);
+  assert.equal(object.details.kind, "object");
+  assert.deepEqual(object.details.structure.class, ["list"]);
+  assert.equal(object.details.structure.length, 2);
+  assert.deepEqual(object.details.structure.names, ["value", "label"]);
+  assert.equal(JSON.stringify(object.details).includes("bounded"), false);
+
+  const functionTool = h.tools.find((tool) => tool.name === "r_function_inspect");
+  const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
+  const functionState = await functionTool.execute("inspect-maker", { function: "make_table" }, undefined, undefined, ctx);
+  await editTool.execute("replace-maker", {
+    function: "make_table",
+    expectedSourceHash: functionState.details.sourceHash,
+    operation: { kind: "replace", body: "{\nlist(value = c(seed, seed + 1L))\n}" },
+  }, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_targets_run")
+    .execute("rerun-table", { names: ["sample_table"], all: false }, undefined, undefined, ctx);
+  const mismatch = await inspectArtifact.execute("inspect-table-mismatch", {
+    target: "sample_table",
+    facets: ["structure"],
+  }, undefined, undefined, ctx);
+  assert.equal(mismatch.details.status, "current");
+  assert.equal(mismatch.details.error, null);
+  assert.deepEqual(mismatch.details.warnings, [{
+    code: "DECLARED_TABLE_NOT_DATA_TABLE",
+    message: "Declared table target is not a data.table",
+    recoverable: true,
+  }]);
+  const listed = await h.tools.find((tool) => tool.name === "r_targets_list")
+    .execute("list-mismatched-table", {}, undefined, undefined, ctx);
+  assert.equal(listed.details.targets.find((target) => target.name === "sample_table").freshness, "current");
 });
 
 test("implementation mode commits only validated Approved Function body edits", async () => {
@@ -525,7 +699,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);

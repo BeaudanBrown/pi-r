@@ -7,6 +7,6 @@ summarise_groups <- function(input, value_col) {
 }
 
 write_result <- function(table, output_path) {
-  saveRDS(table, output_path)
+  qs_save(table, output_path)
   output_path
 }

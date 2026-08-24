@@ -10,7 +10,7 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 - Every target calls exactly one approved function. Its named arguments exactly match that function's parameters.
 - Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
 - Target references must form an acyclic graph.
-- Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`; file artifacts generate `format = "file"`.
+- Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`, which current `targets` implements with the maintained `qs2` package; file artifacts generate `format = "file"`.
 - A controlled file target declares its exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects tracked paths and canonical path escapes.
 - Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
 - Contract, template, policy, and Nixpkgs revisions are pinned.

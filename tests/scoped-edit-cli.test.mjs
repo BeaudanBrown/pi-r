@@ -74,7 +74,7 @@ test("full replacement returns a formatted, parseable candidate without changing
     function: "write_result",
     operation: {
       kind: "replace",
-      body: "{\nsaveRDS( table , output_path )\ninvisible(output_path)\n}",
+      body: "{\nqs_save( table , output_path )\ninvisible(output_path)\n}",
     },
   });
 
@@ -82,7 +82,7 @@ test("full replacement returns a formatted, parseable candidate without changing
   assert.equal(result.code, 0, result.stderr);
   const envelope = JSON.parse(result.stdout);
   assert.equal(envelope.ok, true);
-  assert.match(envelope.value.candidate, /saveRDS\(table, output_path\)/);
+  assert.match(envelope.value.candidate, /qs_save\(table, output_path\)/);
   assert.match(envelope.value.candidate, /invisible\(output_path\)/);
   assert.equal(await readFile(path, "utf8"), original);
 });

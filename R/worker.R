@@ -73,7 +73,7 @@ load_context <- function(target_names) {
   }
 
   for (name in target_names) {
-    if (!grepl("^[A-Za-z][A-Za-z0-9._]*$", name)) stop("Invalid canonical target name: ", name)
+    if (!grepl("^[A-Za-z.][A-Za-z0-9._]*$", name) || grepl("^\\.[0-9]", name)) stop("Invalid canonical target name: ", name)
     if (exists(name, envir = .pi_r_session, inherits = FALSE)) rm(list = name, envir = .pi_r_session)
     assign(name, targets::tar_read_raw(name), envir = .pi_r_globals)
   }

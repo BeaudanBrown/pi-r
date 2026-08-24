@@ -79,3 +79,11 @@ _Avoid_: Shell, worker
 **Failed Target Workspace**:
 The `targets`-saved upstream state from one failed target, loadable only into Transient State for diagnosis.
 _Avoid_: Checkpoint, durable workspace
+
+**Artifact Envelope**:
+The common bounded result describing a target-backed table, object, or file through identity, Artifact Kind, producer/status, requested facets, structure, warnings, and recoverable error.
+_Avoid_: Dump, preview
+
+**Observed Metadata**:
+Cached Artifact Envelope observations tied to a `targets` data hash and invalidated when that hash changes.
+_Avoid_: Target metadata, durable state

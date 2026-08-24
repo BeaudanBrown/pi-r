@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.8.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.9.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -26,17 +26,18 @@
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
             cp ${./R/worker.R} $out/share/pi-r/R/worker.R
             cp ${./R/target_runner.R} $out/share/pi-r/R/target_runner.R
+            cp ${./R/artifact_inspector.R} $out/share/pi-r/R/artifact_inspector.R
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
           '';
 
           rRuntime = pkgs.rWrapper.override {
-            packages = with pkgs.rPackages; [ data_table jsonlite styler targets yaml ];
+            packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.8.0";
+            version = "0.9.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -70,7 +71,8 @@
                 --set-default PI_R_BWRAP "${pkgs.bubblewrap}/bin/bwrap" \
                 --set-default PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set-default PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
-                --set-default PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R"
+                --set-default PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
+                --set-default PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R"
               runHook postInstall
             '';
 
@@ -99,14 +101,21 @@
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
           rTestRuntime = pkgs.rWrapper.override {
-            packages = with pkgs.rPackages; [ data_table jsonlite styler targets yaml ];
+            packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.8.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.9.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME" "$TMPDIR/extension"
+
+            legacy_format="$(printf 'r\144s')"
+            checked_sources="${self}/R ${self}/src ${self}/tests ${self}/docs ${self}/extensions ${self}/resources ${self}/README.md"
+            if grep -RIinw "$legacy_format" $checked_sources || grep -RInE "save$legacy_format|read$legacy_format" $checked_sources; then
+              echo "legacy serialization usage is prohibited; use targets format=qs backed by qs2" >&2
+              exit 1
+            fi
 
             esbuild ${resources}/share/pi-r/extensions/pi-r.ts \
               --bundle \
@@ -134,6 +143,7 @@
               PI_R_PROJECT_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
               PI_R_TARGET_RUNNER_SCRIPT=${resources}/share/pi-r/R/target_runner.R \
+              PI_R_ARTIFACT_INSPECTOR_SCRIPT=${resources}/share/pi-r/R/artifact_inspector.R \
               node --test ${./tests/workbench-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \
