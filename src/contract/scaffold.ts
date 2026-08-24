@@ -146,7 +146,7 @@ export function renderScaffold(contract: ProjectContract): GeneratedFiles {
   const canonicalContract = `${JSON.stringify(contract, null, 2)}\n`;
   const files = new Map<string, string>([
     [".envrc", "use flake\n"],
-    [".gitignore", ".direnv/\n.RData\n.Rhistory\n_targets/\n"],
+    [".gitignore", ".direnv/\n.pi/tmp/\n.RData\n.Rhistory\n_targets/\n"],
     ["R/constants.R", constantsFile(contract)],
     ["_targets.R", targetsFile(contract)],
     ["flake.lock", lockFile(contract)],

@@ -1,12 +1,16 @@
-import { access, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { access, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
+import { validateContract } from "../src/contract/contract.js";
+import { renderScaffold } from "../src/contract/scaffold.js";
+import type { ProjectContract } from "../src/contract/types.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 
 type NoticeLevel = "info" | "warning" | "error";
-type Phase = "design";
+type Phase = "design" | "implementation";
 
 interface WorkbenchState {
   version: 1;
@@ -18,7 +22,7 @@ interface WorkbenchState {
   contractState: "missing" | "present";
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
-  pendingApproval: "none";
+  pendingApproval: "none" | "contract-lock";
   workerState: "stopped";
   readOnlyRoots: string[];
   allowedTools: string[];
@@ -34,6 +38,7 @@ interface CommandContext {
     notify(message: string, level: NoticeLevel): void;
     setWidget?(key: string, content: string[] | undefined): void;
     setStatus?(key: string, content: string | undefined): void;
+    confirm?(title: string, message: string): Promise<boolean>;
   };
 }
 
@@ -51,7 +56,20 @@ interface ExtensionAPI {
       handler(args: string, context: CommandContext): Promise<void>;
     },
   ): void;
-  registerTool?(definition: unknown): void;
+  registerTool(definition: {
+    name: string;
+    label: string;
+    description: string;
+    promptSnippet?: string;
+    parameters: unknown;
+    execute(
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      context: CommandContext,
+    ): Promise<unknown>;
+  }): void;
   on(name: string, handler: (event: any, context: CommandContext) => unknown): void;
   appendEntry(customType: string, data: unknown): void;
   exec(command: string, args: string[], options?: { cwd?: string; timeout?: number }): Promise<ExecResult>;
@@ -75,7 +93,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
   const state = value as Partial<WorkbenchState>;
   return (
     state.version === 1 &&
-    state.phase === "design" &&
+    (state.phase === "design" || state.phase === "implementation") &&
     typeof state.projectRoot === "string" &&
     typeof state.workingDirectory === "string" &&
     state.branch === WORKBENCH_BRANCH &&
@@ -83,8 +101,8 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
     /^[0-9a-f]{40,64}$/.test(state.head) &&
     (state.contractState === "missing" || state.contractState === "present") &&
     state.policyState === "pi-r-policy-v1" &&
-    state.editableScopeCount === 0 &&
-    state.pendingApproval === "none" &&
+    typeof state.editableScopeCount === "number" &&
+    (state.pendingApproval === "none" || state.pendingApproval === "contract-lock") &&
     state.workerState === "stopped" &&
     Array.isArray(state.readOnlyRoots) &&
     state.readOnlyRoots.every((root) => typeof root === "string" && isAbsolute(root)) &&
@@ -128,10 +146,43 @@ function resultMessage(result: ExecResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 }
 
+function contractSummary(contract: ProjectContract): string {
+  const functions = contract.functions.map((fn) => `- ${fn.name}(${fn.parameters.join(", ")})`).join("\n");
+  const constants = Object.entries(contract.constants)
+    .map(([name, value]) => `- ${name} = ${JSON.stringify(value)}`)
+    .join("\n") || "- none";
+  const dependencies = contract.dependencies.map((name) => `- ${name}`).join("\n") || "- none";
+  const graph = contract.targets
+    .map((target) => {
+      const inputs = Object.values(target.arguments).map((argument) =>
+        "target" in argument ? argument.target : `constant:${argument.constant}`,
+      );
+      const pattern = target.pattern ? ` ${target.pattern.kind}(${target.pattern.over.join(", ")})` : "";
+      return `- ${target.name} <- [${inputs.join(", ")}] => ${target.function} (${target.artifact})${pattern}`;
+    })
+    .join("\n");
+  return `Functions and signatures\n${functions}\n\nConstants\n${constants}\n\nDependencies\n${dependencies}\n\nTarget graph\n${graph}`;
+}
+
+async function sourceDiff(root: string, files: ReadonlyMap<string, string>): Promise<string> {
+  const sections: string[] = [];
+  for (const [path, generated] of files) {
+    const current = await readFile(resolve(root, path), "utf8").catch(() => undefined);
+    if (current === generated) continue;
+    const removed = current === undefined ? [] : current.split("\n").map((line) => `-${line}`);
+    const added = generated.split("\n").map((line) => `+${line}`);
+    sections.push(`diff --pi-r ${path}\n--- current/${path}\n+++ generated/${path}\n${[...removed, ...added].join("\n")}`);
+  }
+  const complete = sections.join("\n\n");
+  return complete.length <= 40_000 ? complete : `${complete.slice(0, 40_000)}\n[generated-source diff truncated]`;
+}
+
 /** The only model-context surface is activated after an explicit /r start. */
 export default function piRExtension(pi: ExtensionAPI): void {
   let state: WorkbenchState | undefined;
   let previousActiveTools: string[] | undefined;
+  let proposalRegistered = false;
+  let proposalQueue: Promise<void> = Promise.resolve();
 
   async function git(args: string[], cwd: string, allowFailure = false): Promise<ExecResult> {
     const result = await pi.exec("git", args, { cwd, timeout: 10_000 });
@@ -149,11 +200,60 @@ export default function piRExtension(pi: ExtensionAPI): void {
       .map((tool) => tool.name);
   }
 
-  function enterDesignMode(next: WorkbenchState): void {
+  function phaseTools(phase: Phase): string[] {
+    return phase === "design" && proposalRegistered
+      ? [...safeReadTools(), "r_contract_propose"]
+      : safeReadTools();
+  }
+
+  function enterPhase(next: WorkbenchState): void {
     previousActiveTools ??= pi.getActiveTools();
-    const constrained = { ...next, allowedTools: safeReadTools() };
+    const constrained = { ...next, allowedTools: phaseTools(next.phase) };
     state = constrained;
     pi.setActiveTools(constrained.allowedTools);
+  }
+
+  function registerProposalTool(): void {
+    if (proposalRegistered) return;
+    proposalRegistered = true;
+    pi.registerTool({
+      name: "r_contract_propose",
+      label: "Propose R project contract",
+      description: "Validate and replace the single ignored pi-r Project Contract draft. Does not write project source.",
+      promptSnippet: "Create or revise the schema-validated draft Project Contract during Design Mode",
+      parameters: contractSchema,
+      async execute(_toolCallId, params) {
+        const operation = proposalQueue.then(async () => {
+          if (!state || state.phase !== "design") throw new Error("Contract proposals require active Design Mode");
+          let contract: ProjectContract;
+          try {
+            contract = validateContract(params);
+          } catch (error) {
+            throw new Error(`Contract proposal rejected: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          const excludeResult = await git(["rev-parse", "--git-path", "info/exclude"], state.projectRoot);
+          const excludePath = isAbsolute(excludeResult.stdout.trim())
+            ? excludeResult.stdout.trim()
+            : resolve(state.projectRoot, excludeResult.stdout.trim());
+          const exclusion = await readFile(excludePath, "utf8").catch(() => "");
+          if (!exclusion.split("\n").includes(".pi/tmp/")) {
+            await mkdir(dirname(excludePath), { recursive: true });
+            await writeFile(excludePath, `${exclusion}${exclusion.endsWith("\n") || !exclusion ? "" : "\n"}.pi/tmp/\n`, "utf8");
+          }
+          const draft = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
+          await mkdir(dirname(draft), { recursive: true });
+          const temporary = `${draft}.tmp`;
+          await writeFile(temporary, `${JSON.stringify(contract, null, 2)}\n`, "utf8");
+          await rename(temporary, draft);
+          return {
+            content: [{ type: "text", text: `Draft accepted.\n\n${contractSummary(contract)}` }],
+            details: { draft, summary: contractSummary(contract) },
+          };
+        });
+        proposalQueue = operation.then(() => undefined, () => undefined);
+        return operation;
+      },
+    });
   }
 
   function quarantine(context: CommandContext, message: string): void {
@@ -223,6 +323,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       () => "present" as const,
       () => "missing" as const,
     );
+    registerProposalTool();
     const next: WorkbenchState = {
       version: 1,
       phase: "design",
@@ -236,12 +337,98 @@ export default function piRExtension(pi: ExtensionAPI): void {
       pendingApproval: "none",
       workerState: "stopped",
       readOnlyRoots: uniqueRoots,
-      allowedTools: safeReadTools(),
+      allowedTools: phaseTools("design"),
     };
-    enterDesignMode(next);
+    enterPhase(next);
     pi.appendEntry(STATE_ENTRY, next);
     showHud(context, next);
     context.ui.notify(`pi-r workbench started: ${hud(next)}`, "info");
+  }
+
+  async function writeScaffoldCommit(
+    contract: ProjectContract,
+    files: ReadonlyMap<string, string>,
+  ): Promise<WorkbenchState> {
+    if (!state) throw new Error("Workbench state disappeared");
+    const root = state.projectRoot;
+    const paths = [...files.keys()];
+    const snapshots = new Map<string, string | undefined>();
+    for (const path of paths) snapshots.set(path, await readFile(resolve(root, path), "utf8").catch(() => undefined));
+    try {
+      for (const [path, content] of files) {
+        const destination = resolve(root, path);
+        await mkdir(dirname(destination), { recursive: true });
+        const temporary = `${destination}.pi-r-lock-tmp`;
+        await writeFile(temporary, content, "utf8");
+        await rename(temporary, destination);
+      }
+      await git(["add", "--", ...paths], root);
+      const manifest = JSON.parse(files.get(".pi-r/manifest.json") ?? "{}") as { contractHash?: string };
+      await git(
+        [
+          "commit",
+          "-m",
+          "Lock pi-r project contract",
+          "-m",
+          `Contract-Hash: ${manifest.contractHash ?? "unknown"}\nTemplate-Version: ${contract.templateVersion}\nPolicy-Version: ${contract.policyVersion}`,
+          "--",
+          ...paths,
+        ],
+        root,
+      );
+    } catch (error) {
+      await git(["reset", "--quiet", "HEAD", "--", ...paths], root, true);
+      for (const [path, previous] of snapshots) {
+        const destination = resolve(root, path);
+        if (previous === undefined) await rm(destination, { force: true });
+        else {
+          await mkdir(dirname(destination), { recursive: true });
+          await writeFile(destination, previous, "utf8");
+        }
+      }
+      throw error;
+    }
+    const head = (await git(["rev-parse", "HEAD"], root)).stdout.trim();
+    return {
+      ...state,
+      phase: "implementation",
+      head,
+      contractState: "present",
+      editableScopeCount: contract.functions.length,
+      pendingApproval: "none",
+      allowedTools: phaseTools("implementation"),
+    };
+  }
+
+  async function lock(context: CommandContext): Promise<void> {
+    if (!state || state.phase !== "design") throw new Error("Contract lock requires active Design Mode");
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new Error(mismatch);
+    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+    if (dirty.stdout.trim()) throw new Error("tracked source changed after workbench start");
+    const draftPath = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
+    const draftText = await readFile(draftPath, "utf8").catch(() => {
+      throw new Error("No valid contract draft exists; use r_contract_propose first");
+    });
+    const contract = validateContract(JSON.parse(draftText));
+    const files = renderScaffold(contract);
+    const diff = await sourceDiff(state.projectRoot, files);
+    state = { ...state, pendingApproval: "contract-lock" };
+    showHud(context, state);
+    const review = `${contractSummary(contract)}\n\nGenerated-source diff\n${diff || "(no generated changes)"}`;
+    if (!context.ui.confirm) throw new Error("Contract lock requires an interactive confirmation UI");
+    const approved = await context.ui.confirm("Lock Project Contract and generated scaffold?", review);
+    if (!approved) {
+      state = { ...state, pendingApproval: "none" };
+      showHud(context, state);
+      context.ui.notify("Project Contract lock cancelled; validated draft preserved", "info");
+      return;
+    }
+    const implementation = await writeScaffoldCommit(contract, files);
+    enterPhase(implementation);
+    pi.appendEntry(STATE_ENTRY, implementation);
+    showHud(context, implementation);
+    context.ui.notify(`Project Contract locked: ${hud(implementation)}`, "info");
   }
 
   pi.on("session_start", async (_event, context) => {
@@ -253,7 +440,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
         quarantine(context, `pi-r cannot resume: ${mismatch}`);
         return;
       }
-      enterDesignMode(restored);
+      if (restored.phase === "design") registerProposalTool();
+      enterPhase(restored);
       showHud(context, restored);
     } catch (error) {
       quarantine(context, `pi-r cannot resume: ${error instanceof Error ? error.message : String(error)}`);
@@ -269,8 +457,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event, context) => {
     if (!state) return;
-    if (!state.allowedTools.includes(event.toolName) || !(READ_TOOLS as readonly string[]).includes(event.toolName)) {
-      return { block: true, reason: "pi-r design mode permits only gated read/search tools" };
+    if (!state.allowedTools.includes(event.toolName)) {
+      return { block: true, reason: `pi-r ${state.phase} mode blocks this tool` };
+    }
+    if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
+    if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
+      return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
     }
     const rawPath = typeof event.input?.path === "string" ? event.input.path.replace(/^@/, "") : context.cwd;
     const requested = isAbsolute(rawPath) ? rawPath : resolve(context.cwd, rawPath);
@@ -286,8 +478,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event) => {
     if (!state) return undefined;
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
+    const proposal = state.phase === "design"
+      ? " Use r_contract_propose to create or revise the single Project Contract draft."
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools.";
     return {
-      systemPrompt: `${event.systemPrompt}\n\npi-r design mode is active. You are read-only. Use only read/search tools within: ${roots}. Do not request shell or mutation tools.`,
+      systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}`,
     };
   });
 
@@ -309,8 +504,20 @@ export default function piRExtension(pi: ExtensionAPI): void {
         context.ui.notify(hud(state), "info");
         return;
       }
+      if (subcommand === "lock") {
+        try {
+          await lock(context);
+        } catch (error) {
+          if (state?.pendingApproval === "contract-lock") {
+            state = { ...state, pendingApproval: "none" };
+            showHud(context, state);
+          }
+          context.ui.notify(`pi-r lock failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
       if (subcommand !== "start") {
-        context.ui.notify("Usage: /r start [read-only-root ...] | /r status", "warning");
+        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock", "warning");
         return;
       }
       try {

@@ -12,9 +12,15 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.4.0" { } ''
+          piResources = pkgs.runCommand "pi-r-resources-0.5.0" {
+            nativeBuildInputs = [ pkgs.esbuild ];
+          } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
-            cp ${./extensions/pi-r.ts} $out/share/pi-r/extensions/pi-r.ts
+            esbuild ${self}/extensions/pi-r.ts \
+              --bundle \
+              --platform=node \
+              --format=esm \
+              --outfile=$out/share/pi-r/extensions/pi-r.ts
             cp ${./R/pi_r_runtime.R} $out/share/pi-r/R/pi_r_runtime.R
             cp ${./R/read_contract.R} $out/share/pi-r/R/read_contract.R
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
@@ -28,7 +34,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.4.0";
+            version = "0.5.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -87,7 +93,7 @@
           piR = self.packages.${system}.pi-r;
           resources = self.packages.${system}.pi-resources;
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.4.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.5.0" {
             nativeBuildInputs = [ pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -105,7 +111,9 @@
               node --test ${./tests/library-smoke.test.mjs}
             PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               node --test ${./tests/extension-smoke.test.mjs}
-            PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
+            PI_R_CLI=${piR}/bin/pi-r \
+              PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
+              PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
               node --test ${./tests/workbench-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \

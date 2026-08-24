@@ -43,3 +43,15 @@ _Avoid_: Allowlist, mount
 **Current-State HUD**:
 The bounded status line showing phase, Git provenance, contract/policy state, editable scope count, approval state, and R worker state.
 _Avoid_: Dashboard, telemetry
+
+**Contract Draft**:
+The single ignored, machine-managed, schema-valid Project Contract proposal revised during Design Mode.
+_Avoid_: Temporary config, model output
+
+**Provenance Commit**:
+The single deterministic commit that locks the approved Project Contract and its complete generated scaffold with contract, template, and policy identifiers.
+_Avoid_: Checkpoint, save
+
+**Implementation Mode**:
+The post-lock Workbench Session phase in which the Project Contract is immutable and only Approved Function bodies may become editable through scoped capabilities.
+_Avoid_: Coding mode, write mode

@@ -35,7 +35,15 @@ The extension resource can be tried with Pi using the `extension` path reported 
 /r status
 ```
 
-Start stashes tracked changes, creates or resumes `pi-r/workbench`, and switches the model to project-scoped read/search tools. Optional roots are canonicalized and added as read-only attachments. Phase state is persisted in the Pi session; resume fails closed if the working directory, repository, branch, or HEAD changed. See [Git-backed Workbench Sessions](docs/workbench-session.md) for the lifecycle and security boundary.
+Start stashes tracked changes, creates or resumes `pi-r/workbench`, and switches the model to project-scoped read/search tools plus the typed contract proposal tool. Optional roots are canonicalized and added as read-only attachments. Phase state is persisted in the Pi session; resume fails closed if the working directory, repository, branch, or HEAD changed. See [Git-backed Workbench Sessions](docs/workbench-session.md) for the lifecycle and security boundary.
+
+After iterating on one ignored, machine-managed Project Contract draft, review and lock the semantic design and complete generated-source diff:
+
+```console
+/r lock
+```
+
+Confirmation writes the complete scaffold, creates one provenance commit, and enters Implementation Mode. See [Project Contract design and lock](docs/design-lock.md).
 
 ## Scoped R function tracer
 

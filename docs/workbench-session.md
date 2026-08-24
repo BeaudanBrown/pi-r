@@ -17,7 +17,7 @@ On Pi session resume, the extension verifies the canonical working directory, re
 
 ## Design Mode boundary
 
-Design Mode activates only built-in `read`, `grep`, `find`, and `ls` tools. It disables shell and mutation tools and independently blocks every tool call not in that set. Read/search paths are resolved through the filesystem before they are checked against the canonical project root and optional user-attached Read-Only Roots, preventing `..` and symlink escapes.
+Design Mode activates built-in `read`, `grep`, `find`, and `ls` plus the typed, draft-only `r_contract_propose` tool. It disables shell and general mutation tools and independently blocks every tool call outside that compact set. Read/search paths are resolved through the filesystem before they are checked against the canonical project root and optional user-attached Read-Only Roots, preventing `..` and symlink escapes. See [Project Contract design and lock](design-lock.md) for the proposal tool and approval transaction.
 
 Optional roots may be absolute or relative to the active working directory. Quote a root containing spaces.
 
