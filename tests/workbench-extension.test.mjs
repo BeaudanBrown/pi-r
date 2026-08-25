@@ -175,6 +175,13 @@ function harness(entries = []) {
   return { commands, tools, handlers, activeToolChanges, appended, entries };
 }
 
+function schemaPatterns(value, output = []) {
+  if (!value || typeof value !== "object") return output;
+  if (typeof value.pattern === "string") output.push(value.pattern);
+  for (const child of Object.values(value)) schemaPatterns(child, output);
+  return output;
+}
+
 function context(root, entries = [], confirmations = []) {
   const notifications = [];
   const widgets = [];
@@ -221,6 +228,9 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.equal(h.appended[0].data.phase, "design");
   assert.deepEqual(h.appended[0].data.readOnlyRoots, [await realpath(attached)]);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset"]);
+  const patterns = h.tools.flatMap((tool) => schemaPatterns(tool.parameters));
+  assert.ok(patterns.length > 0);
+  assert.equal(patterns.every((pattern) => pattern.startsWith("^") && pattern.endsWith("$")), true, `local llama.cpp requires anchored JSON Schema patterns: ${patterns.join(", ")}`);
   assert.match(ctx.widgets.at(-1)[1][0], /phase=design .*branch=pi-r\/workbench@[0-9a-f]{7,}/);
   assert.match(ctx.widgets.at(-1)[1][0], /contract=missing policy=pi-r-policy-v1 scopes=0 approval=none worker=stopped/);
 
