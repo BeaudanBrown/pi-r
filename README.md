@@ -38,7 +38,7 @@ The extension resource can be tried with Pi using the `extension` path reported 
 /r stop
 ```
 
-Start stashes tracked changes, creates or resumes `pi-r/workbench`, and switches the model to project-scoped read/search tools plus the typed contract proposal tool. Optional roots are canonicalized and added as read-only attachments. Phase state is persisted in the Pi session; resume fails closed if the working directory, repository, branch, or HEAD changed. See [Git-backed Workbench Sessions](docs/workbench-session.md) for the lifecycle and security boundary.
+Start stashes tracked changes and creates or resumes `pi-r/workbench`. New projects enter Design Mode with the typed contract proposal tool; projects with a locked contract preflight their generated environment and enter Implementation Mode. Optional roots are canonicalized and added as read-only attachments. Phase state is persisted in the Pi session; resume fails closed if the working directory, repository, branch, or HEAD changed. See [Git-backed Workbench Sessions](docs/workbench-session.md) for the lifecycle and security boundary.
 
 After iterating on one ignored, machine-managed Project Contract draft, review and lock the semantic design and complete generated-source diff:
 
@@ -48,9 +48,9 @@ After iterating on one ignored, machine-managed Project Contract draft, review a
 
 Confirmation writes the complete scaffold, creates one provenance commit, and enters Implementation Mode. See [Project Contract design and lock](docs/design-lock.md).
 
-Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked names and signatures, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
+Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked topology, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. Topology changes use user-only `/r revise`, followed by `/r lock` or `/r cancel-revision`; dependency-only changes remain in the governed environment workflow. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
 
-Both constrained phases expose bounded raw CSV/TSV inspection and temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. One non-persistent Current-State HUD gives every agent call the latest bounded worker/object inventory without accumulating stale snapshots. See [Persistent sandboxed R exploration](docs/r-worker.md).
+All constrained modes expose bounded raw CSV/TSV inspection and temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. One XML-delimited, non-persistent agent-facing Current-State HUD gives every model call current mode, authority, transition, and bounded worker/object inventory without accumulating stale snapshots or appearing as a user request. See [Persistent sandboxed R exploration](docs/r-worker.md).
 
 Implementation Mode can list and run only contracted targets through a separate controlled runner. Full-pipeline execution is explicit, complete logs remain local, failures return bounded target/traceback details, and saved failed workspaces can be loaded into temporary worker state. See [Controlled target operations](docs/target-operations.md).
 

@@ -20,6 +20,10 @@ _Avoid_: Script, callback
 The persistence category of a target: table, object, or file.
 _Avoid_: Format
 
+**Source File Target**:
+A file target that tracks one existing read-only input path from a Project Contract constant without an Approved Function producer. It participates in invalidation but is never a generated output or Versioned Deliverable.
+_Avoid_: File output, file producer, raw-data deliverable
+
 **Dynamic Pattern**:
 A declared map or cross relationship that controls dynamic target branching; absence means an unbranched target.
 _Avoid_: Static branching, iteration mode
@@ -41,8 +45,12 @@ A canonical project or user-attached path under which Design Mode may read or se
 _Avoid_: Allowlist, mount
 
 **Current-State HUD**:
-The bounded runtime-only agent context projection showing current phase, Git provenance, contract/policy and environment state, approval state, R worker state, and object inventory. It replaces itself before each model call and is distinct from the operator-facing TUI widget.
-_Avoid_: Dashboard, telemetry, status history
+The bounded runtime-only, agent-facing context projection maintained at the logical tail of every model context while a Workbench Session is active. It tells the agent its current Mode, authority, valid transition, contract/policy and environment state, approval state, R worker state, and relevant object inventory. It replaces rather than accumulates before each model call and is never the operator-facing TUI display.
+_Avoid_: Operator Status Widget, dashboard, telemetry, status history
+
+**Operator Status Widget**:
+The human-facing TUI summary of the active Workbench Session. It may render selected Current-State HUD facts, but it is not model context and is not called a HUD.
+_Avoid_: Current-State HUD, agent message, model state
 
 **Contract Draft**:
 The single ignored, machine-managed, schema-valid Project Contract proposal revised during Design Mode.
@@ -53,8 +61,12 @@ The single deterministic commit that locks the approved Project Contract and its
 _Avoid_: Checkpoint, save
 
 **Implementation Mode**:
-The post-lock Workbench Session phase in which the Project Contract is immutable and only Approved Function bodies may become editable through scoped capabilities.
+The post-lock Workbench Session phase in which target/function topology is locked, Approved Function bodies may become editable through scoped capabilities, and dependency-only changes use the governed environment workflow.
 _Avoid_: Coding mode, write mode
+
+**Contract Revision Mode**:
+The user-entered Workbench Session phase that seeds an ignored Contract Draft from the locked Project Contract while leaving committed source unchanged. It permits topology revision until user-approved relock or cancellation.
+_Avoid_: Automatic mode switch, unlocked implementation, environment change
 
 **Scoped Mutation**:
 One stale-safe replacement or exact patch confined to an Approved Function body, validated before one provenance commit.

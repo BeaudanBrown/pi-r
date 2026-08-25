@@ -20,13 +20,30 @@ export interface ApprovedFunction {
 
 export type ArgumentReference = { target: string } | { constant: string };
 
-export interface TargetDefinition {
+export interface ProducedTargetDefinition {
   name: string;
   function: string;
   artifact: ArtifactKind;
   arguments: Record<string, ArgumentReference>;
   output?: { parameter: string; constant: string };
   pattern?: { kind: PatternKind; over: string[] };
+  source?: never;
+}
+
+export interface SourceFileTargetDefinition {
+  name: string;
+  artifact: "file";
+  source: { constant: string };
+  arguments: Record<string, never>;
+  function?: never;
+  output?: never;
+  pattern?: never;
+}
+
+export type TargetDefinition = ProducedTargetDefinition | SourceFileTargetDefinition;
+
+export function isSourceFileTarget(target: TargetDefinition): target is SourceFileTargetDefinition {
+  return "source" in target;
 }
 
 export interface VersionedDeliverable {

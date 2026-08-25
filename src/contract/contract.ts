@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { RecoverableError } from "../r-edit/errors.js";
-import { fileTargetOutputs, validateDeliverablePath } from "./deliverables.js";
+import { fileTargetOutputs, validateDeliverablePath, validateSourcePath } from "./deliverables.js";
 import {
   ARTIFACT_KINDS,
   PATTERN_KINDS,
@@ -11,6 +11,7 @@ import {
   type ContractSummary,
   type NixpkgsPin,
   type ProjectContract,
+  isSourceFileTarget,
   type TargetDefinition,
 } from "./types.js";
 
@@ -117,6 +118,143 @@ function assertAcyclic(targets: TargetDefinition[]): void {
   for (const target of targets) visit(target.name);
 }
 
+function proposalSemanticIssues(proposal: Record<string, unknown>): string[] {
+  if (!Array.isArray(proposal.functions) || !Array.isArray(proposal.targets)) return [];
+  const issues: string[] = [];
+  const constants = proposal.constants && typeof proposal.constants === "object" && !Array.isArray(proposal.constants)
+    ? proposal.constants as Record<string, unknown>
+    : {};
+  const constantNames = new Set(Object.keys(constants));
+  const functions = proposal.functions.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const value = entry as Record<string, unknown>;
+    return typeof value.name === "string" && Array.isArray(value.parameters)
+      ? [{ name: value.name, parameters: value.parameters.filter((item): item is string => typeof item === "string") }]
+      : [];
+  });
+  const duplicateFunctions = functions.map((fn) => fn.name).filter((name, index, all) => all.indexOf(name) !== index);
+  if (duplicateFunctions.length) issues.push(`functions: duplicate names [${[...new Set(duplicateFunctions)].sort().join(", ")}]`);
+  const functionByName = new Map(functions.map((fn) => [fn.name, fn]));
+  const functionNames = new Set(functionByName.keys());
+  const targetRecords = proposal.targets.map((entry, index) => ({
+    index,
+    value: entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : undefined,
+  }));
+  const targetNames = new Set(targetRecords.flatMap(({ value }) => typeof value?.name === "string" ? [value.name] : []));
+  const duplicateTargets = [...targetNames].filter((name) => targetRecords.filter(({ value }) => value?.name === name).length > 1);
+  if (duplicateTargets.length) issues.push(`targets: duplicate names [${duplicateTargets.sort().join(", ")}]`);
+  const sourcePaths = new Set<string>();
+  const generatedPaths = new Set<string>();
+
+  targetRecords.forEach(({ value: target, index }) => {
+    if (!target) return;
+    const path = `targets[${index}]`;
+    const name = typeof target.name === "string" ? target.name : path;
+    if (functionNames.has(name)) issues.push(`${path}: target name '${name}' must differ from Approved Function names`);
+    const source = target.source !== undefined;
+    if (source) {
+      if (target.artifact !== "file") issues.push(`${path}: Source File Target artifact must be file`);
+      if (target.function !== undefined) issues.push(`${path}: Source File Target must omit function`);
+      if (target.output !== undefined) issues.push(`${path}: Source File Target must omit generated output binding`);
+      if (target.pattern !== undefined) issues.push(`${path}: Source File Target must omit dynamic pattern`);
+      if (target.arguments && typeof target.arguments === "object" && Object.keys(target.arguments).length > 0) {
+        issues.push(`${path}: Source File Target arguments must be empty`);
+      }
+      const sourceRecord = target.source && typeof target.source === "object" && !Array.isArray(target.source)
+        ? target.source as Record<string, unknown>
+        : undefined;
+      const constant = sourceRecord?.constant;
+      if (typeof constant !== "string" || !constantNames.has(constant)) {
+        issues.push(`${path}: Source File Target must reference a declared path constant`);
+      } else if (typeof constants[constant] !== "string") {
+        issues.push(`${path}: Source File Target constant '${constant}' must be a string path`);
+      } else {
+        const sourcePath = constants[constant] as string;
+        sourcePaths.add(sourcePath);
+        try {
+          validateSourcePath(sourcePath, `${path}.source path`);
+        } catch (error) {
+          issues.push(error instanceof Error ? error.message : `${path}: invalid source path`);
+        }
+      }
+      return;
+    }
+    if (typeof target.function !== "string" || !functionNames.has(target.function)) {
+      issues.push(`${path}: target '${name}' must call a declared Approved Function`);
+    }
+    if (target.artifact === "file" && target.output === undefined) {
+      issues.push(`${path}: generated file target must declare output { parameter, constant }; use source for an existing input file`);
+    }
+    const fn = typeof target.function === "string" ? functionByName.get(target.function) : undefined;
+    const argumentsRecord = target.arguments && typeof target.arguments === "object" && !Array.isArray(target.arguments)
+      ? target.arguments as Record<string, unknown>
+      : {};
+    const argumentNames = Object.keys(argumentsRecord);
+    for (const [parameter, rawReference] of Object.entries(argumentsRecord)) {
+      const reference = rawReference && typeof rawReference === "object" && !Array.isArray(rawReference)
+        ? rawReference as Record<string, unknown>
+        : {};
+      if (typeof reference.target === "string" && !targetNames.has(reference.target)) {
+        issues.push(`${path}.arguments.${parameter}: unknown target '${reference.target}'`);
+      }
+      if (typeof reference.constant === "string" && !constantNames.has(reference.constant)) {
+        issues.push(`${path}.arguments.${parameter}: unknown constant '${reference.constant}'`);
+      }
+    }
+    const output = target.output && typeof target.output === "object" && !Array.isArray(target.output)
+      ? target.output as Record<string, unknown>
+      : undefined;
+    if (typeof output?.parameter === "string" && argumentNames.includes(output.parameter)) {
+      issues.push(`${path}: output parameter '${output.parameter}' must not also appear in arguments`);
+    }
+    if (typeof output?.constant === "string") {
+      if (!constantNames.has(output.constant) || typeof constants[output.constant] !== "string") {
+        issues.push(`${path}: generated output must reference a declared string constant`);
+      } else {
+        const outputPath = constants[output.constant] as string;
+        generatedPaths.add(outputPath);
+        try {
+          validateDeliverablePath(outputPath, `${path}.output path`);
+        } catch (error) {
+          issues.push(error instanceof Error ? error.message : `${path}: invalid output path`);
+        }
+      }
+    }
+    if (fn) {
+      const bound = [...argumentNames, ...(typeof output?.parameter === "string" ? [output.parameter] : [])];
+      const missing = fn.parameters.filter((parameter) => !bound.includes(parameter));
+      const extra = bound.filter((parameter) => !fn.parameters.includes(parameter));
+      if (missing.length || extra.length) {
+        issues.push(`${path}: bindings must exactly match ${target.function}(${fn.parameters.join(", ")}); missing=[${missing.join(", ")}], extra=[${extra.join(", ")}]`);
+      }
+    }
+  });
+
+  for (const path of sourcePaths) {
+    if (generatedPaths.has(path)) issues.push(`targets: source path '${path}' must not also be a generated output`);
+  }
+  if (Array.isArray(proposal.deliverables)) {
+    proposal.deliverables.forEach((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+      const value = entry as Record<string, unknown>;
+      if (typeof value.path === "string") {
+        try {
+          validateDeliverablePath(value.path, `deliverables[${index}].path`);
+        } catch (error) {
+          issues.push(error instanceof Error ? error.message : `deliverables[${index}]: invalid path`);
+        }
+      }
+      if (typeof value.target === "string") {
+        const target = targetRecords.find(({ value: candidate }) => candidate?.name === value.target)?.value;
+        if (!target) issues.push(`deliverables[${index}]: unknown target '${value.target}'`);
+        else if (target.source !== undefined) issues.push(`deliverables[${index}]: Source File Targets cannot be Versioned Deliverables`);
+        else if (target.artifact !== "file") issues.push(`deliverables[${index}]: target '${value.target}' is not a generated file target`);
+      }
+    });
+  }
+  return [...new Set(issues)];
+}
+
 export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): ProjectContract {
   const proposal = object(input, "proposal");
   exactKeys(
@@ -126,12 +264,10 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
   );
   const project = object(proposal.project, "proposal.project");
   exactKeys(project, ["name"], "proposal.project");
-  if (Array.isArray(proposal.targets)) {
-    proposal.targets.forEach((entry, index) => {
-      const target = object(entry, `proposal.targets[${index}]`);
-      if (target.artifact === "file" && target.output === undefined) {
-        invalid(`proposal.targets[${index}] file target must declare output { parameter, constant }`);
-      }
+  const issues = proposalSemanticIssues(proposal);
+  if (issues.length > 0) {
+    invalid(`proposal has ${issues.length} semantic issue${issues.length === 1 ? "" : "s"}:\n- ${issues.join("\n- ")}\nAll listed issues must be corrected together; unlisted fields have not yet passed authoritative validation.`, {
+      issues,
     });
   }
   return validateContract({
@@ -222,7 +358,7 @@ export function validateContract(input: unknown): ProjectContract {
   const targets: TargetDefinition[] = targetsInput.map((entry, index) => {
     const path = `targets[${index}]`;
     const target = object(entry, path);
-    exactKeys(target, ["name", "function", "artifact", "arguments", "output", "pattern"], path);
+    exactKeys(target, ["name", "function", "artifact", "arguments", "source", "output", "pattern"], path);
     const artifact = string(target.artifact, `${path}.artifact`);
     if (!(ARTIFACT_KINDS as readonly string[]).includes(artifact)) {
       invalid(`${path}.artifact must be table, object, or file`);
@@ -234,7 +370,13 @@ export function validateContract(input: unknown): ProjectContract {
         reference(argumentsInput[name], `${path}.arguments.${name}`),
       ]),
     );
-    let output: TargetDefinition["output"];
+    let source: { constant: string } | undefined;
+    if (target.source !== undefined) {
+      const sourceInput = object(target.source, `${path}.source`);
+      exactKeys(sourceInput, ["constant"], `${path}.source`);
+      source = { constant: rName(sourceInput.constant, `${path}.source.constant`) };
+    }
+    let output: { parameter: string; constant: string } | undefined;
     if (target.output !== undefined) {
       const outputInput = object(target.output, `${path}.output`);
       exactKeys(outputInput, ["parameter", "constant"], `${path}.output`);
@@ -255,8 +397,18 @@ export function validateContract(input: unknown): ProjectContract {
       if (over.length === 0) invalid(`${path}.pattern.over must not be empty`);
       pattern = { kind: kind as "map" | "cross", over };
     }
+    const name = rName(target.name, `${path}.name`);
+    if (source) {
+      if (artifact !== "file") invalid(`${path}.source requires artifact file`);
+      if (target.function !== undefined || output !== undefined || pattern !== undefined) {
+        invalid(`${path} Source File Target must omit function, output, and pattern`);
+      }
+      if (Object.keys(args).length > 0) invalid(`${path} Source File Target arguments must be empty`);
+      return { name, artifact: "file", source, arguments: {} };
+    }
+    if (target.function === undefined) invalid(`${path}.function is required unless source is declared`);
     return {
-      name: rName(target.name, `${path}.name`),
+      name,
       function: rName(target.function, `${path}.function`),
       artifact: artifact as "table" | "object" | "file",
       arguments: args,
@@ -265,11 +417,30 @@ export function validateContract(input: unknown): ProjectContract {
     };
   });
   if (new Set(targets.map((target) => target.name)).size !== targets.length) invalid("target names must be unique");
+  const conflictingNames = targets.map((target) => target.name).filter((name) => functions.some((fn) => fn.name === name));
+  if (conflictingNames.length > 0) {
+    invalid("target names must differ from Approved Function names", { names: conflictingNames.sort() });
+  }
 
   const functionByName = new Map(functions.map((fn) => [fn.name, fn]));
   const targetNames = new Set(targets.map((target) => target.name));
   const constantNames = new Set(Object.keys(constants));
   for (const target of targets) {
+    if (isSourceFileTarget(target)) {
+      if (!constantNames.has(target.source.constant)) {
+        invalid(`Source File Target '${target.name}' references unknown constant '${target.source.constant}'`);
+      }
+      const sourcePath = constants[target.source.constant];
+      if (typeof sourcePath !== "string") {
+        invalid(`Source File Target '${target.name}' must reference a string constant`);
+      }
+      try {
+        validateSourcePath(sourcePath, `Source File Target '${target.name}' path`);
+      } catch (error) {
+        invalid(error instanceof Error ? error.message : `Source File Target '${target.name}' path is invalid`);
+      }
+      continue;
+    }
     const fn = functionByName.get(target.function);
     if (!fn) invalid(`target '${target.name}' calls an unapproved function`, { function: target.function });
     const argumentNames = Object.keys(target.arguments);
@@ -313,7 +484,7 @@ export function validateContract(input: unknown): ProjectContract {
   }
   assertAcyclic(targets);
 
-  for (const target of targets.filter((candidate) => candidate.artifact === "file")) {
+  for (const target of targets.filter((candidate) => candidate.artifact === "file" && !isSourceFileTarget(candidate))) {
     const outputs = fileTargetOutputs(target, constants);
     if (outputs.length !== 1) invalid(`file target '${target.name}' must declare exactly one constant output path`);
     try {
@@ -321,6 +492,18 @@ export function validateContract(input: unknown): ProjectContract {
     } catch (error) {
       invalid(error instanceof Error ? error.message : `file target '${target.name}' output is invalid`);
     }
+  }
+
+  const sourcePaths = new Set(
+    targets.filter(isSourceFileTarget).map((target) => constants[target.source.constant]).filter((value): value is string => typeof value === "string"),
+  );
+  const generatedPaths = new Set(
+    targets.filter((target) => target.artifact === "file" && !isSourceFileTarget(target))
+      .flatMap((target) => fileTargetOutputs(target, constants)),
+  );
+  const inputOutputCollisions = [...sourcePaths].filter((path) => generatedPaths.has(path));
+  if (inputOutputCollisions.length > 0) {
+    invalid("Source File Target paths must not also be generated file outputs", { paths: inputOutputCollisions.sort() });
   }
 
   const deliverablesInput = root.deliverables ?? [];
@@ -340,6 +523,7 @@ export function validateContract(input: unknown): ProjectContract {
     const target = targets.find((candidate) => candidate.name === targetName);
     if (!target) invalid(`${path}.target must refer to a declared target`);
     if (target.artifact !== "file") invalid(`${path}.target must be a file target`);
+    if (isSourceFileTarget(target)) invalid(`${path}.target must be a generated file target, not a Source File Target`);
     if (target.pattern) invalid(`${path}.target must not use dynamic branching`);
     if (!fileTargetOutputs(target, constants).includes(declaredPath)) {
       invalid(`${path}.path must equal the file target's declared output path`);

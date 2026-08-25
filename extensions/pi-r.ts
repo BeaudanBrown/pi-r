@@ -5,9 +5,8 @@ import { fileURLToPath } from "node:url";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
 import { normalizeContractProposal, validateContract } from "../src/contract/contract.js";
 import { fileTargetOutputs } from "../src/contract/deliverables.js";
-import type { NixpkgsPin } from "../src/contract/types.js";
+import { isSourceFileTarget, type NixpkgsPin, type ProjectContract } from "../src/contract/types.js";
 import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
-import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerObject, type WorkerState } from "../src/workbench/r-worker.js";
@@ -36,9 +35,23 @@ const ARTIFACT_TOOL = "r_artifact_inspect";
 const DATA_TOOL = "r_data_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
 const SCOUT_TOOL = "r_dependency_scout";
-const LIVE_STATE_MESSAGE = "pi-r-live-state";
+const LIVE_STATE_MESSAGE = "pi-r-current-state";
+const PI_R_RUNTIME_VERSION = "0.17.0";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
+const MODEL_R_NAME_PATTERN = "^[A-Za-z.][A-Za-z0-9._]*$";
+
+function llamaCompatibleSchema(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  delete record.not;
+  delete record.propertyNames;
+  if (typeof record.pattern === "string" && record.pattern.includes("?!")) {
+    record.pattern = MODEL_R_NAME_PATTERN;
+  }
+  for (const child of Object.values(record)) llamaCompatibleSchema(child);
+}
+
 const CONTRACT_PROPOSAL_SCHEMA = (() => {
   const schema = structuredClone(contractSchema) as Record<string, any>;
   schema.required = schema.required.filter((name: string) => !["contractVersion", "templateVersion", "policyVersion"].includes(name));
@@ -47,6 +60,8 @@ const CONTRACT_PROPOSAL_SCHEMA = (() => {
   delete schema.properties.policyVersion;
   schema.properties.project.required = ["name"];
   delete schema.properties.project.properties.nixpkgs;
+  schema.description = "Complete Design or Revision Mode project decisions. Approved Functions declare signatures only; targets call those functions, while Source File Targets use source.constant and omit function/output.";
+  llamaCompatibleSchema(schema);
   return schema;
 })();
 
@@ -66,7 +81,7 @@ const EVALUATE_SCHEMA = {
   required: ["code", "targets"],
   properties: {
     code: { type: "string", minLength: 1, maxLength: 50_000 },
-    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
+    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
   },
 } as const;
 const EMPTY_SCHEMA = { type: "object", additionalProperties: false, properties: {} } as const;
@@ -75,7 +90,7 @@ const ARTIFACT_INSPECT_SCHEMA = {
   additionalProperties: false,
   required: ["target", "facets"],
   properties: {
-    target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" },
+    target: { type: "string", pattern: MODEL_R_NAME_PATTERN },
     facets: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["structure", "summary"] } },
   },
 } as const;
@@ -107,14 +122,14 @@ const TARGET_WORKSPACE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["target"],
-  properties: { target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
+  properties: { target: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
 } as const;
 const RUN_TARGETS_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["names", "all"],
   properties: {
-    names: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" } },
+    names: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
     all: { type: "boolean" },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: 1800 },
   },
@@ -158,16 +173,17 @@ const EDIT_SCHEMA = {
 } as const;
 
 type NoticeLevel = "info" | "warning" | "error";
-type Phase = "design" | "implementation";
+type Phase = "design" | "revision" | "implementation";
 
 interface WorkbenchState {
-  version: 1;
+  version: 2;
+  runtimeVersion: typeof PI_R_RUNTIME_VERSION;
   phase: Phase;
   projectRoot: string;
   workingDirectory: string;
   branch: string;
   head: string;
-  contractState: "missing" | "present";
+  contractState: "missing" | "draft" | "locked";
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
   pendingApproval: "none" | "contract-lock" | "environment-change" | "deliverable-publish";
@@ -254,14 +270,15 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
   if (!value || typeof value !== "object") return false;
   const state = value as Partial<WorkbenchState>;
   return (
-    state.version === 1 &&
-    (state.phase === "design" || state.phase === "implementation") &&
+    state.version === 2 &&
+    state.runtimeVersion === PI_R_RUNTIME_VERSION &&
+    (state.phase === "design" || state.phase === "revision" || state.phase === "implementation") &&
     typeof state.projectRoot === "string" &&
     typeof state.workingDirectory === "string" &&
     state.branch === WORKBENCH_BRANCH &&
     typeof state.head === "string" &&
     /^[0-9a-f]{40,64}$/.test(state.head) &&
-    (state.contractState === "missing" || state.contractState === "present") &&
+    (state.contractState === "missing" || state.contractState === "draft" || state.contractState === "locked") &&
     state.policyState === "pi-r-policy-v1" &&
     typeof state.editableScopeCount === "number" &&
     (state.pendingApproval === "none" || state.pendingApproval === "contract-lock" || state.pendingApproval === "environment-change" || state.pendingApproval === "deliverable-publish") &&
@@ -272,12 +289,13 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
   );
 }
 
-function restoreState(entries: unknown[]): WorkbenchState | undefined {
+function restoreState(entries: unknown[]): WorkbenchState | "stale" | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index] as { type?: string; customType?: string; data?: unknown };
     if (entry?.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
     if ((entry.data as { inactive?: unknown } | undefined)?.inactive === true) return undefined;
     if (isWorkbenchState(entry.data)) return entry.data;
+    return "stale";
   }
   return undefined;
 }
@@ -287,14 +305,17 @@ function shortHead(head: string): string {
 }
 
 function hud(state: WorkbenchState): string {
+  const duty = state.phase === "design" ? "contract-design" : state.phase === "revision" ? "contract-revision" : "scoped-implementation";
   return [
-    `phase=${state.phase}`,
-    `branch=${state.branch}@${shortHead(state.head)}`,
+    `mode=${state.phase}`,
+    `duty=${duty}`,
     `contract=${state.contractState}`,
-    `policy=${state.policyState}`,
+    `topology=${state.phase === "implementation" ? "locked" : "editable"}`,
     `scopes=${state.editableScopeCount}`,
     `approval=${state.pendingApproval}`,
     `worker=${state.workerState}`,
+    `runtime=${state.runtimeVersion}`,
+    `branch=${state.branch}@${shortHead(state.head)}`,
   ].join(" ");
 }
 
@@ -321,7 +342,9 @@ function contractSummary(contract: ProjectContract): string {
         "target" in argument ? argument.target : `constant:${argument.constant}`,
       );
       const pattern = target.pattern ? ` ${target.pattern.kind}(${target.pattern.over.join(", ")})` : "";
-      return `- ${target.name} <- [${inputs.join(", ")}] => ${target.function} (${target.artifact})${pattern}`;
+      return isSourceFileTarget(target)
+        ? `- ${target.name} <- [constant:${target.source.constant}] => source file (file)`
+        : `- ${target.name} <- [${inputs.join(", ")}] => ${target.function} (${target.artifact})${pattern}`;
     })
     .join("\n");
   return `Functions and signatures\n${functions}\n\nConstants\n${constants}\n\nDependencies\n${dependencies}\n\nVersioned deliverables\n${deliverables}\n\nTarget graph\n${graph}`;
@@ -340,7 +363,39 @@ async function canonicalDestination(path: string): Promise<string> {
   }
 }
 
-async function sourceDiff(root: string, files: ReadonlyMap<string, string>): Promise<string> {
+async function validateSourceFileAuthority(contract: ProjectContract, projectRoot: string, readOnlyRoots: string[]): Promise<void> {
+  const generatedPaths = contract.targets.filter((target) => target.artifact === "file" && !isSourceFileTarget(target))
+    .flatMap((target) => fileTargetOutputs(target, contract.constants))
+    .map((path) => resolve(projectRoot, path));
+  const generated = new Set(await Promise.all(generatedPaths.map((path) =>
+    realpath(path).catch(() => canonicalDestination(path)),
+  )));
+  for (const target of contract.targets.filter(isSourceFileTarget)) {
+    const declared = contract.constants[target.source.constant];
+    if (typeof declared !== "string") throw new Error(`Source File Target ${target.name} lost its string path`);
+    const absoluteSource = isAbsolute(declared);
+    const requested = absoluteSource ? declared : resolve(projectRoot, declared);
+    const canonical = await realpath(requested).catch(() => undefined);
+    if (!canonical) throw new Error(`Source File Target ${target.name} does not exist: ${declared}`);
+    const permittedRoots = absoluteSource ? readOnlyRoots : [projectRoot];
+    const permitted = permittedRoots.some((root) => {
+      const rel = relative(root, canonical);
+      return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    });
+    if (!permitted) {
+      throw new Error(
+        absoluteSource
+          ? `Source File Target ${target.name} uses an absolute path outside attached Read-Only Roots`
+          : `Source File Target ${target.name} is outside the project root`,
+      );
+    }
+    if (generated.has(canonical)) {
+      throw new Error(`Source File Target ${target.name} must not also be a generated file output`);
+    }
+  }
+}
+
+async function sourceDiff(root: string, files: ReadonlyMap<string, string>, removedPaths: readonly string[] = []): Promise<string> {
   const sections: string[] = [];
   for (const [path, generated] of files) {
     const current = await readFile(resolve(root, path), "utf8").catch(() => undefined);
@@ -348,6 +403,11 @@ async function sourceDiff(root: string, files: ReadonlyMap<string, string>): Pro
     const removed = current === undefined ? [] : current.split("\n").map((line) => `-${line}`);
     const added = generated.split("\n").map((line) => `+${line}`);
     sections.push(`diff --pi-r ${path}\n--- current/${path}\n+++ generated/${path}\n${[...removed, ...added].join("\n")}`);
+  }
+  for (const path of removedPaths) {
+    const current = await readFile(resolve(root, path), "utf8").catch(() => undefined);
+    if (current === undefined) continue;
+    sections.push(`diff --pi-r ${path}\n--- current/${path}\n+++ /dev/null\n${current.split("\n").map((line) => `-${line}`).join("\n")}`);
   }
   const complete = sections.join("\n\n");
   return complete.length <= 40_000 ? complete : `${complete.slice(0, 40_000)}\n[generated-source diff truncated]`;
@@ -387,6 +447,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let liveObjects: WorkerObject[] = [];
   let liveTransientStateLost = false;
   let liveTransition = "inactive";
+  let previousCompletionTruncated = false;
 
   function updateLiveWorker(objects: WorkerObject[], transientStateLost: boolean, transition?: string): void {
     const originOrder: Record<WorkerObject["origin"], number> = { temporary: 0, target: 1, global: 2 };
@@ -398,7 +459,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   function environmentIdentity(): string {
-    if (!state || state.phase === "design") return "design:bundled";
+    if (!state || state.phase !== "implementation") return "design:bundled";
     if (!projectRscript) return "project:generated";
     const store = projectRscript.match(/^\/nix\/store\/([^/]+)/)?.[1];
     return `project:${store ?? basename(dirname(dirname(projectRscript)))}`.slice(0, 200);
@@ -412,32 +473,54 @@ export default function piRExtension(pi: ExtensionAPI): void {
       class: object.class.slice(0, 8).map((name) => name.slice(0, 200)),
       bytes: object.bytes,
     }));
+    const agentDuty = state.phase === "design"
+      ? "contract_design"
+      : state.phase === "revision" ? "contract_revision" : "scoped_implementation";
     const snapshot = {
       version: 1,
-      phase: state.phase,
-      branch: state.branch,
-      head: shortHead(state.head),
-      contract: state.contractState,
-      policy: state.policyState,
-      editableScopes: state.editableScopeCount,
+      origin: "pi-r-extension",
+      runtimeVersion: state.runtimeVersion,
+      mode: state.phase,
+      agentDuty,
+      contract: {
+        state: state.contractState,
+        topologyChanges: state.phase !== "implementation",
+        proposalToolAvailable: state.phase !== "implementation",
+      },
+      authority: {
+        editableFunctionCount: state.editableScopeCount,
+        generalMutation: false,
+      },
+      transition: state.phase === "implementation"
+        ? { topologyChange: { command: "/r revise", requiresUser: true } }
+        : { publishDraft: { command: "/r lock", requiresUser: true } },
       approval: state.pendingApproval,
       environment: { identity: environmentIdentity() },
       worker: {
         state: state.workerState,
         transientStateLost: liveTransientStateLost,
         targetsCache: "preserved",
+        lastTransition: liveTransition,
       },
-      transition: liveTransition,
+      provenance: { branch: state.branch, head: shortHead(state.head) },
+      ...(previousCompletionTruncated
+        ? { previousCompletion: { status: "truncated", safeToAssumeCompleted: false } }
+        : {}),
       objectCount: allObjects.length,
       objectsTruncated: allObjects.length > MAX_LIVE_OBJECTS,
       objects: allObjects.slice(0, MAX_LIVE_OBJECTS),
     };
-    let content = JSON.stringify(snapshot);
+    const safeJson = () => JSON.stringify(snapshot).replace(/[<>&]/g, (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
+    const wrap = () => `<pi_r_current_state>\n${safeJson()}\n</pi_r_current_state>`;
+    let content = wrap();
     while (Buffer.byteLength(content) > MAX_LIVE_STATE_BYTES && snapshot.objects.length) {
       snapshot.objects.pop();
       snapshot.objectsTruncated = true;
-      content = JSON.stringify(snapshot);
+      content = wrap();
     }
+    if (previousCompletionTruncated) previousCompletionTruncated = false;
     return content;
   }
 
@@ -460,7 +543,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   function phaseTools(phase: Phase): string[] {
     const workerTools = workerRegistered ? [...WORKER_TOOLS] : [];
     const dataTools = dataRegistered ? [DATA_TOOL] : [];
-    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools, ...dataTools];
+    if ((phase === "design" || phase === "revision") && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools, ...dataTools];
     const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
     const artifactTools = artifactRegistered ? [ARTIFACT_TOOL] : [];
     const environmentTools = environmentRegistered ? [ENVIRONMENT_TOOL] : [];
@@ -684,7 +767,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
               const declaration = contract.targets.find((target) => target.name === status.name)!;
               return {
                 ...status,
-                function: declaration.function,
+                function: isSourceFileTarget(declaration) ? null : declaration.function,
+                sourceConstant: isSourceFileTarget(declaration) ? declaration.source.constant : null,
                 artifact: declaration.artifact,
                 arguments: declaration.arguments,
                 pattern: declaration.pattern ?? null,
@@ -718,6 +802,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             throw new RecoverableError("AMBIGUOUS_TARGET_SELECTION", "Use either explicit target names or all=true, not both");
           }
           const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+          await validateSourceFileAuthority(contract, state.projectRoot, state.readOnlyRoots);
           const contractNames = contract.targets.map((target) => target.name);
           const names = input.all === true ? contractNames : requested;
           const unknown = names.filter((name) => !contractNames.includes(name));
@@ -986,12 +1071,14 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: "r_contract_propose",
       label: "Propose R project contract",
-      description: "Validate and replace the single ignored pi-r Project Contract draft. Does not write project source.",
-      promptSnippet: "Create or revise the schema-validated draft Project Contract during Design Mode",
+      description: "Validate and replace the complete ignored Project Contract draft in Design or Contract Revision Mode. Approved Functions declare signatures only and lock as fail-closed stubs. Ordinary targets call declared Approved Functions. Existing input files use source.constant and omit function/output; generated file outputs use output bindings. Does not write project source.",
+      promptSnippet: "Propose all project decisions once; Source File Targets use source.constant, package calls use Approved Function wrappers, and target names must differ from function names",
       parameters: CONTRACT_PROPOSAL_SCHEMA,
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = proposalQueue.then(async () => {
-          if (!state || state.phase !== "design") throw new Error("Contract proposals require active Design Mode");
+          if (!state || (state.phase !== "design" && state.phase !== "revision")) {
+            throw new Error("Contract proposals require active Design or Contract Revision Mode");
+          }
           let contract: ProjectContract;
           try {
             const pinPath = process.env.PI_R_NIXPKGS_PIN_PATH;
@@ -1015,6 +1102,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
           const temporary = `${draft}.tmp`;
           await writeFile(temporary, `${JSON.stringify(contract, null, 2)}\n`, "utf8");
           await rename(temporary, draft);
+          state = { ...state, contractState: "draft" };
+          pi.appendEntry(STATE_ENTRY, state);
+          showHud(context, state);
           return {
             content: [{ type: "text", text: `Draft accepted.\n\n${contractSummary(contract)}` }],
             details: { draft, summary: contractSummary(contract) },
@@ -1232,32 +1322,57 @@ export default function piRExtension(pi: ExtensionAPI): void {
     }
 
     const head = (await git(["rev-parse", "HEAD"], workingDirectory)).stdout.trim();
-    const contractState = await access(resolve(projectRoot, "pi-r.yml")).then(
-      () => "present" as const,
-      () => "missing" as const,
-    );
+    const contractPath = resolve(projectRoot, "pi-r.yml");
+    const hasLockedContract = await access(contractPath).then(() => true, () => false);
+    const lockedContract = hasLockedContract
+      ? validateContract(JSON.parse(await readFile(contractPath, "utf8")))
+      : undefined;
+    if (lockedContract) await validateSourceFileAuthority(lockedContract, projectRoot, uniqueRoots);
     worker?.stop(true);
     worker = undefined;
     projectRscript = undefined;
     updateLiveWorker([], false, "workbench-started");
+    previousCompletionTruncated = false;
     previousActiveTools ??= pi.getActiveTools();
-    registerProposalTool();
     registerWorkerTools();
     registerDataTool();
+    let phase: Phase = "design";
+    let contractState: WorkbenchState["contractState"] = "missing";
+    let editableScopeCount = 0;
+    if (lockedContract) {
+      const validated = await validateContractEnvironment(
+        projectRoot,
+        lockedContract,
+        (command, args, options) => pi.exec(command, args, options),
+      );
+      await preflightWorker(projectRoot, uniqueRoots, "project", validated.runtime);
+      projectRscript = validated.runtime;
+      phase = "implementation";
+      contractState = "locked";
+      editableScopeCount = lockedContract.functions.length;
+      registerEditTool();
+      registerTargetTools();
+      registerArtifactTool();
+      registerEnvironmentTool();
+      registerScoutTool();
+    } else {
+      registerProposalTool();
+    }
     const next: WorkbenchState = {
-      version: 1,
-      phase: "design",
+      version: 2,
+      runtimeVersion: PI_R_RUNTIME_VERSION,
+      phase,
       projectRoot,
       workingDirectory,
       branch: WORKBENCH_BRANCH,
       head,
       contractState,
       policyState: "pi-r-policy-v1",
-      editableScopeCount: 0,
+      editableScopeCount,
       pendingApproval: "none",
       workerState: "stopped",
       readOnlyRoots: uniqueRoots,
-      allowedTools: phaseTools("design"),
+      allowedTools: phaseTools(phase),
     };
     enterPhase(next);
     pi.appendEntry(STATE_ENTRY, next);
@@ -1434,10 +1549,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
     contract: ProjectContract,
     files: ReadonlyMap<string, string>,
     runtime: string,
+    removedPaths: readonly string[] = [],
   ): Promise<WorkbenchState> {
     if (!state) throw new Error("Workbench state disappeared");
     const root = state.projectRoot;
-    const paths = [...files.keys()];
+    const revision = state.phase === "revision";
+    const paths = [...new Set([...files.keys(), ...removedPaths])].sort();
     const snapshots = new Map<string, string | undefined>();
     for (const path of paths) snapshots.set(path, await readFile(resolve(root, path), "utf8").catch(() => undefined));
     try {
@@ -1448,13 +1565,14 @@ export default function piRExtension(pi: ExtensionAPI): void {
         await writeFile(temporary, content, "utf8");
         await rename(temporary, destination);
       }
-      await git(["add", "--", ...paths], root);
+      for (const path of removedPaths) await rm(resolve(root, path), { force: true });
+      await git(["add", "-A", "--", ...paths], root);
       const manifest = JSON.parse(files.get(".pi-r/manifest.json") ?? "{}") as { contractHash?: string };
       await git(
         [
           "commit",
           "-m",
-          "Lock pi-r project contract",
+          revision ? "Revise pi-r project contract" : "Lock pi-r project contract",
           "-m",
           `Contract-Hash: ${manifest.contractHash ?? "unknown"}\nTemplate-Version: ${contract.templateVersion}\nPolicy-Version: ${contract.policyVersion}`,
           "--",
@@ -1485,15 +1603,91 @@ export default function piRExtension(pi: ExtensionAPI): void {
       ...state,
       phase: "implementation",
       head,
-      contractState: "present",
+      contractState: "locked",
       editableScopeCount: contract.functions.length,
       pendingApproval: "none",
       allowedTools: phaseTools("implementation"),
     };
   }
 
+  async function revise(context: CommandContext): Promise<void> {
+    if (!state || state.phase !== "implementation") throw new Error("Contract revision requires active Implementation Mode");
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new Error(mismatch);
+    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+    if (dirty.stdout.trim()) throw new Error("tracked source changed before contract revision");
+    await access(resolve(state.projectRoot, ".pi/tmp/pi-r-environment-candidate.json")).then(
+      () => { throw new Error("Resolve or discard the pending Environment Candidate before contract revision"); },
+      () => undefined,
+    );
+    if (state.pendingApproval !== "none") throw new Error(`Resolve pending approval '${state.pendingApproval}' before contract revision`);
+    const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+    const { contractVersion: _contractVersion, templateVersion: _templateVersion, policyVersion: _policyVersion, ...projectDecisions } = contract;
+    const proposal = { ...projectDecisions, project: { name: contract.project.name } };
+    const transientObjects = liveObjects.length;
+    if (!context.ui.confirm) throw new Error("Contract revision requires an interactive confirmation UI");
+    const approved = await context.ui.confirm(
+      "Enter Contract Revision Mode?",
+      `The committed contract remains unchanged. The R worker will stop and discard ${transientObjects} transient object(s).`,
+    );
+    if (!approved) {
+      context.ui.notify("Contract revision cancelled", "info");
+      return;
+    }
+    const draft = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
+    await mkdir(dirname(draft), { recursive: true });
+    await writeFile(draft, `${JSON.stringify(proposal, null, 2)}\n`, "utf8");
+    worker?.stop(true);
+    worker = undefined;
+    projectRscript = undefined;
+    updateLiveWorker([], transientObjects > 0 || liveTransientStateLost, "contract-revision-started");
+    registerProposalTool();
+    const next: WorkbenchState = {
+      ...state,
+      phase: "revision",
+      contractState: "draft",
+      editableScopeCount: 0,
+      workerState: "stopped",
+      allowedTools: phaseTools("revision"),
+    };
+    enterPhase(next);
+    pi.appendEntry(STATE_ENTRY, next);
+    showHud(context, next);
+    context.ui.notify("Contract Revision Mode active; revise the seeded draft with r_contract_propose, then use /r lock or /r cancel-revision", "info");
+  }
+
+  async function cancelRevision(context: CommandContext): Promise<void> {
+    if (!state || state.phase !== "revision") throw new Error("No Contract Revision is active");
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new Error(mismatch);
+    const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+    const validated = await validateContractEnvironment(
+      state.projectRoot,
+      contract,
+      (command, args, options) => pi.exec(command, args, options),
+    );
+    await preflightWorker(state.projectRoot, state.readOnlyRoots, "project", validated.runtime);
+    await rm(resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json"), { force: true });
+    projectRscript = validated.runtime;
+    const next: WorkbenchState = {
+      ...state,
+      phase: "implementation",
+      contractState: "locked",
+      editableScopeCount: contract.functions.length,
+      workerState: "stopped",
+      allowedTools: phaseTools("implementation"),
+    };
+    enterPhase(next);
+    updateLiveWorker([], liveTransientStateLost, "contract-revision-cancelled");
+    pi.appendEntry(STATE_ENTRY, next);
+    showHud(context, next);
+    context.ui.notify("Contract revision cancelled; unchanged locked contract restored", "info");
+  }
+
   async function lock(context: CommandContext): Promise<void> {
-    if (!state || state.phase !== "design") throw new Error("Contract lock requires active Design Mode");
+    if (!state || (state.phase !== "design" && state.phase !== "revision")) {
+      throw new Error("Contract lock requires active Design or Contract Revision Mode");
+    }
     const mismatch = await verifyState(state, context);
     if (mismatch) throw new Error(mismatch);
     const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
@@ -1515,14 +1709,29 @@ export default function piRExtension(pi: ExtensionAPI): void {
         throw new RecoverableError("UNREGISTERED_PACKAGE", `Initial dependency requires an explicit governed approval: ${dependency}`);
       }
     }
-    const files = renderScaffold(contract);
+    await validateSourceFileAuthority(contract, state.projectRoot, state.readOnlyRoots);
+    const files = new Map(renderScaffold(contract));
+    const removedPaths: string[] = [];
+    if (state.phase === "revision") {
+      const previous = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+      for (const fn of contract.functions) {
+        const prior = previous.functions.find((candidate) => candidate.name === fn.name);
+        if (prior && JSON.stringify(prior.parameters) === JSON.stringify(fn.parameters)) {
+          const path = `R/${fn.name}.R`;
+          files.set(path, await readFile(resolve(state.projectRoot, path), "utf8"));
+        }
+      }
+      for (const fn of previous.functions) {
+        if (!contract.functions.some((candidate) => candidate.name === fn.name)) removedPaths.push(`R/${fn.name}.R`);
+      }
+    }
     const validatedEnvironment = await validateContractEnvironment(
       state.projectRoot,
       contract,
       (command, args, options) => pi.exec(command, args, options),
     );
     await preflightWorker(state.projectRoot, state.readOnlyRoots, "project", validatedEnvironment.runtime);
-    const diff = await sourceDiff(state.projectRoot, files);
+    const diff = await sourceDiff(state.projectRoot, files, removedPaths);
     state = { ...state, pendingApproval: "contract-lock" };
     showHud(context, state);
     const review = `${contractSummary(contract)}\n\nGenerated-source diff\n${diff || "(no generated changes)"}`;
@@ -1534,7 +1743,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       context.ui.notify("Project Contract lock cancelled; validated draft preserved", "info");
       return;
     }
-    const implementation = await writeScaffoldCommit(contract, files, validatedEnvironment.runtime);
+    const implementation = await writeScaffoldCommit(contract, files, validatedEnvironment.runtime, removedPaths);
     registerEditTool();
     registerTargetTools();
     registerArtifactTool();
@@ -1551,6 +1760,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (configuredLauncherTools?.length) pi.setActiveTools([...new Set(configuredLauncherTools)]);
     const restored = restoreState(context.sessionManager.getBranch());
     if (!restored) return;
+    if (restored === "stale") {
+      quarantine(context, `pi-r cannot resume: saved runtime state is incompatible with pi-r ${PI_R_RUNTIME_VERSION}; start a fresh Pi session`);
+      return;
+    }
     previousActiveTools ??= pi.getActiveTools();
     try {
       const mismatch = await verifyState(restored, context);
@@ -1560,7 +1773,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       }
       registerWorkerTools();
       registerDataTool();
-      if (restored.phase === "design") registerProposalTool();
+      if (restored.phase === "design" || restored.phase === "revision") registerProposalTool();
       if (restored.phase === "implementation") {
         registerEditTool();
         registerTargetTools();
@@ -1576,10 +1789,17 @@ export default function piRExtension(pi: ExtensionAPI): void {
     }
   });
 
+  pi.on("message_end", async (event) => {
+    if (!state || event.message?.role !== "assistant") return;
+    if (event.message.stopReason === "length") previousCompletionTruncated = true;
+    else if (event.message.stopReason === "stop") previousCompletionTruncated = false;
+  });
+
   pi.on("session_shutdown", async (_event, context) => {
     worker?.stop();
     worker = undefined;
     updateLiveWorker([], false, "inactive");
+    previousCompletionTruncated = false;
     if (previousActiveTools) pi.setActiveTools(previousActiveTools);
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", undefined);
@@ -1591,7 +1811,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (!state.allowedTools.includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode blocks this tool` };
     }
-    if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
+    if (event.toolName === "r_contract_propose" && (state.phase === "design" || state.phase === "revision")) return undefined;
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
     if (event.toolName === DATA_TOOL) return undefined;
     if ((TARGET_TOOLS as readonly string[]).includes(event.toolName) && state.phase === "implementation") return undefined;
@@ -1608,7 +1828,15 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const permitted =
       canonical !== undefined &&
       roots.some((root) => canonical === root || (!relative(root, canonical).startsWith(`..${sep}`) && relative(root, canonical) !== ".." && !isAbsolute(relative(root, canonical))));
-    if (!permitted) return { block: true, reason: "pi-r read path is outside approved read-only roots" };
+    if (!permitted) {
+      const packagedGuidance = requested.startsWith("/nix/store/") && requested.includes("pi-r-resources") && !requested.startsWith(resourceRoot);
+      return {
+        block: true,
+        reason: packagedGuidance
+          ? `That packaged reference belongs to a different pi-r runtime. Do not search the project for it. Current trusted guidance roots: ${(await guidanceRoots).join(", ")}`
+          : "pi-r read path is outside approved read-only roots",
+      };
+    }
     return undefined;
   });
 
@@ -1621,29 +1849,37 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return candidate.role !== "custom" || candidate.customType !== LIVE_STATE_MESSAGE;
       },
     );
-    return {
-      messages: [
-        ...messages,
-        {
-          role: "custom",
-          customType: LIVE_STATE_MESSAGE,
-          content: liveStateContent(),
-          display: false,
-          timestamp: Date.now(),
-        },
-      ],
+    const currentState = {
+      role: "custom",
+      customType: LIVE_STATE_MESSAGE,
+      content: liveStateContent(),
+      display: false,
+      timestamp: Date.now(),
     };
+    let userIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = messages[index] as { role?: unknown };
+      if (candidate?.role === "user") {
+        userIndex = index;
+        break;
+      }
+    }
+    if (userIndex < 0) return { messages: [currentState, ...messages] };
+    return { messages: [...messages.slice(0, userIndex), currentState, ...messages.slice(userIndex)] };
   });
 
   pi.on("before_agent_start", async (event) => {
     if (!state) return undefined;
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
-    const proposal = state.phase === "design"
-      ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
+    const currentGuidance = (await guidanceRoots).join(", ");
+    const proposal = state.phase !== "implementation"
+      ? " Use r_contract_propose to create or revise the single Project Contract draft. Approved Functions declare signatures only and lock as fail-closed stubs. Existing input files are Source File Targets using source.constant; generated files use output bindings."
+      : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
     const exploration = " Use r_data_inspect for bounded CSV/TSV inputs before targets exist. Use evaluate_r for bounded temporary computation; target objects must be requested explicitly by canonical name. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
+    const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
+    const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. Stay in the current mode when authority is sufficient. A topology change in Implementation Mode requires the user-only /r revise command: state that once, do not call unavailable proposal tools, and wait. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. Answer confirmation questions directly before constructing detailed payloads.";
     return {
-      systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
+      systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active (runtime ${PI_R_RUNTIME_VERSION}). Use only the active compact tools within: ${roots}. Current trusted pi-r guidance: ${currentGuidance}. Do not use remembered Nix-store guidance paths from another runtime. Do not request shell or general mutation tools.${currentStateRule}${routing}${proposal}${exploration}`,
     };
   });
 
@@ -1680,6 +1916,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         projectRscript = undefined;
         state = undefined;
         updateLiveWorker([], false, "inactive");
+        previousCompletionTruncated = false;
         pi.appendEntry(STATE_ENTRY, { inactive: true });
         if (previousActiveTools) pi.setActiveTools(previousActiveTools);
         previousActiveTools = undefined;
@@ -1747,6 +1984,22 @@ export default function piRExtension(pi: ExtensionAPI): void {
         }
         return;
       }
+      if (subcommand === "revise") {
+        try {
+          await revise(context);
+        } catch (error) {
+          context.ui.notify(`pi-r revise failed: ${actionableToolError(error).message}`, "error");
+        }
+        return;
+      }
+      if (subcommand === "cancel-revision") {
+        try {
+          await cancelRevision(context);
+        } catch (error) {
+          context.ui.notify(`pi-r cancel-revision failed: ${actionableToolError(error).message}`, "error");
+        }
+        return;
+      }
       if (subcommand === "lock") {
         try {
           await lock(context);
@@ -1760,7 +2013,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return;
       }
       if (subcommand !== "start") {
-        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r stop | /r lock | /r environment | /r publish", "warning");
+        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r stop | /r revise | /r cancel-revision | /r lock | /r environment | /r publish", "warning");
         return;
       }
       try {

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
 import { inspectRFile } from "../r-edit/tree-sitter.js";
 import { fileTargetOutputs } from "./deliverables.js";
-import type { ConstantValue, ProjectContract, TargetDefinition } from "./types.js";
+import { isSourceFileTarget, type ConstantValue, type ProjectContract, type TargetDefinition } from "./types.js";
 
 export type GeneratedFiles = ReadonlyMap<string, string>;
 
@@ -49,6 +49,9 @@ function argumentExpression(reference: TargetDefinition["arguments"][string]): s
 }
 
 function targetExpression(target: TargetDefinition, contract: ProjectContract): string {
+  if (isSourceFileTarget(target)) {
+    return `  tar_target(${target.name}, PI_R_CONSTANTS$${target.source.constant}, format = "file")`;
+  }
   const fn = contract.functions.find((candidate) => candidate.name === target.function);
   if (!fn) throw new Error(`Validated function '${target.function}' disappeared`);
   const callArguments = fn.parameters

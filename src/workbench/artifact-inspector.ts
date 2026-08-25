@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
 import { sandboxRuntimePath } from "./sandbox.js";
-import type { ArtifactKind, TargetDefinition } from "../contract/types.js";
+import { isSourceFileTarget, type ArtifactKind, type TargetDefinition } from "../contract/types.js";
 
 export type ArtifactFacet = "structure" | "summary";
 export type ArtifactStatus = "current" | "missing" | "stale" | "failed";
@@ -12,7 +12,7 @@ export type ArtifactStatus = "current" | "missing" | "stale" | "failed";
 export interface ArtifactEnvelope {
   identity: { target: string; metadataHash: string | null };
   kind: ArtifactKind;
-  producer: { function: string; arguments: TargetDefinition["arguments"]; pattern: TargetDefinition["pattern"] | null };
+  producer: { function: string | null; sourceConstant: string | null; arguments: TargetDefinition["arguments"]; pattern: TargetDefinition["pattern"] | null };
   status: ArtifactStatus;
   facets: ArtifactFacet[];
   structure: any;
@@ -52,6 +52,12 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function producer(target: TargetDefinition): ArtifactEnvelope["producer"] {
+  return isSourceFileTarget(target)
+    ? { function: null, sourceConstant: target.source.constant, arguments: {}, pattern: null }
+    : { function: target.function, sourceConstant: null, arguments: target.arguments, pattern: target.pattern ?? null };
+}
+
 function parseEnvelope(value: unknown, target: TargetDefinition, facets: ArtifactFacet[]): ArtifactEnvelope {
   if (!value || typeof value !== "object") throw new Error("Inspector returned a non-object envelope");
   const candidate = value as any;
@@ -64,7 +70,7 @@ function parseEnvelope(value: unknown, target: TargetDefinition, facets: Artifac
       metadataHash: typeof candidate.identity.metadataHash === "string" ? candidate.identity.metadataHash : null,
     },
     kind: target.artifact,
-    producer: { function: target.function, arguments: target.arguments, pattern: target.pattern ?? null },
+    producer: producer(target),
     status: candidate.status,
     facets,
     structure: candidate.structure ?? null,
@@ -105,7 +111,7 @@ export async function inspectArtifact(
   const request = {
     target: target.name,
     kind: target.artifact,
-    producer: { function: target.function, arguments: target.arguments, pattern: target.pattern ?? null },
+    producer: producer(target),
     facets,
     cached,
   };

@@ -22,7 +22,23 @@ A semantically empty design is valid:
 
 It generates required targets infrastructure ending in `list()`, without placeholder Approved Functions or targets.
 
-File outputs are explicit rather than inferred from parameter names:
+Existing read-only inputs are Source File Targets and require no artificial producer function:
+
+```json
+{
+  "constants": { "input_csv": "data/input.csv" },
+  "targets": [
+    {
+      "name": "input_csv_file",
+      "artifact": "file",
+      "arguments": {},
+      "source": { "constant": "input_csv" }
+    }
+  ]
+}
+```
+
+They render with `format = "file"`, participate in invalidation, and cannot be Versioned Deliverables. Generated file outputs are explicit rather than inferred from parameter names:
 
 ```json
 {
@@ -46,9 +62,11 @@ File outputs are explicit rather than inferred from parameter names:
 
 The `output.parameter` must name an Approved Function parameter omitted from `arguments`; `output.constant` must name one safe project-relative string constant. Every other Approved Function parameter is bound exactly once through `arguments`. Any referenced upstream target must also be declared in the complete proposal.
 
-## Implementation Mode
+## Implementation and Contract Revision Modes
 
 General shell and mutation are unavailable. Approved Function bodies are the only source-edit scope. Target listing/execution/workspace recovery, artifact inspection, governed dependency proposals, bounded dependency research, and the persistent R worker are exposed as typed tools. Source and attached roots are read-only inside Bubblewrap execution.
+
+Implementation Mode locks function/target topology. Dependency-only changes use `r_dependency_propose` and user-only `/r environment`. Topology changes require user-only `/r revise`, which seeds an ignored draft while committed source stays unchanged. `/r lock` publishes the revision while preserving bodies whose Approved Function names and signatures did not change; `/r cancel-revision` returns to the unchanged locked contract.
 
 Each successful durable mutation creates one provenance commit. Environment activation restarts R and discards Transient State while preserving the targets cache. Generated target outputs remain uncommitted unless declared as Versioned Deliverables and approved through `/r publish`.
 

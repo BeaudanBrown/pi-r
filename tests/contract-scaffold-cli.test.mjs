@@ -123,6 +123,45 @@ test("legacy inferred file-output bindings remain readable", async () => {
   assert.equal((await run(["contract", "validate", source])).code, 0);
 });
 
+test("Source File Targets track existing inputs without artificial producer functions", async () => {
+  const initial = await outputDirectory();
+  assert.equal((await run(["contract", "generate", contract, initial])).code, 0);
+  const definition = JSON.parse(await readFile(join(initial, "pi-r.yml"), "utf8"));
+  definition.constants.source_csv = "data/source.csv";
+  definition.targets.unshift({
+    name: "source_csv",
+    artifact: "file",
+    arguments: {},
+    source: { constant: "source_csv" },
+  });
+  definition.targets.find((target) => target.name === "raw_data").arguments.path = { target: "source_csv" };
+  const source = join(await mkdtemp(join(tmpdir(), "pi-r-source-file-contract-")), "contract.json");
+  await writeFile(source, JSON.stringify(definition));
+  const output = await outputDirectory();
+  const generated = await run(["contract", "generate", source, output]);
+  assert.equal(generated.code, 0, generated.stderr);
+  const targets = await readFile(join(output, "_targets.R"), "utf8");
+  assert.match(targets, /tar_target\(source_csv, PI_R_CONSTANTS\$source_csv, format = "file"\)/);
+  assert.doesNotMatch(targets, /source_csv\(/);
+  const ignored = await readFile(join(output, ".gitignore"), "utf8");
+  assert.doesNotMatch(ignored, /^\/data\/source\.csv$/m);
+
+  const report = definition.targets.find((target) => target.name === "report");
+  const previousOutputConstant = report.output.constant;
+  report.output.constant = "source_csv";
+  await writeFile(source, JSON.stringify(definition));
+  const collision = await run(["contract", "validate", source]);
+  assert.equal(collision.code, 1);
+  assert.match(JSON.parse(collision.stdout).error.message, /must not also be generated file outputs/);
+  report.output.constant = previousOutputConstant;
+
+  definition.deliverables = [{ target: "source_csv", path: "data/source.csv" }];
+  await writeFile(source, JSON.stringify(definition));
+  const invalid = await run(["contract", "validate", source]);
+  assert.equal(invalid.code, 1);
+  assert.match(JSON.parse(invalid.stdout).error.message, /generated file target, not a Source File Target/);
+});
+
 test("declared deliverables remain versionable while exact undeclared file outputs are ignored", async () => {
   const initial = await outputDirectory();
   assert.equal((await run(["contract", "generate", contract, initial])).code, 0);

@@ -88,10 +88,14 @@
         "additionalProperties": false,
         "required": ["name", "parameters"],
         "properties": {
-          "name": { "$ref": "#/$defs/rName" },
+          "name": {
+            "$ref": "#/$defs/rName",
+            "description": "Approved Function name. The contract declares only its signature; locking creates a fail-closed body stub."
+          },
           "parameters": {
             "type": "array",
             "uniqueItems": true,
+            "description": "Required parameter names only. Function bodies are not part of a contract proposal.",
             "items": { "$ref": "#/$defs/rName" }
           }
         }
@@ -103,15 +107,28 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "function", "artifact", "arguments"],
+        "required": ["name", "artifact", "arguments"],
         "properties": {
           "name": { "$ref": "#/$defs/rName" },
-          "function": { "$ref": "#/$defs/rName" },
+          "function": {
+            "$ref": "#/$defs/rName",
+            "description": "Approved Function called by an ordinary target. Package functions must be wrapped by an Approved Function. Omit for a Source File Target."
+          },
           "artifact": { "enum": ["table", "object", "file"] },
           "arguments": {
             "type": "object",
+            "description": "Binds every Approved Function input parameter exactly once to a target or constant. Empty for a Source File Target.",
             "propertyNames": { "$ref": "#/$defs/rName" },
             "additionalProperties": { "$ref": "#/$defs/argumentReference" }
+          },
+          "source": {
+            "type": "object",
+            "description": "Declares an existing read-only input file tracked with targets format=file. Source files do not call an Approved Function and are not generated outputs.",
+            "additionalProperties": false,
+            "required": ["constant"],
+            "properties": {
+              "constant": { "$ref": "#/$defs/rName" }
+            }
           },
           "output": {
             "type": "object",

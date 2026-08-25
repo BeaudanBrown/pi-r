@@ -1,4 +1,4 @@
-import { posix } from "node:path";
+import { isAbsolute, posix } from "node:path";
 import type { ConstantValue, TargetDefinition } from "./types.js";
 
 const OUTPUT_PARAMETER = /(?:^|_)(?:output|file)?path$/i;
@@ -17,6 +17,18 @@ export function validateDeliverablePath(value: unknown, label = "deliverable pat
   }
   if (RESERVED_ROOTS.has(segments[0]) || RESERVED_FILES.has(value)) {
     throw new Error(`${label} overlaps pi-r runtime or source control paths`);
+  }
+  return value;
+}
+
+export function validateSourcePath(value: unknown, label = "source file path"): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 500 || value.includes("\0")) {
+    throw new Error(`${label} must be a bounded path`);
+  }
+  if (!isAbsolute(value)) return validateDeliverablePath(value, label);
+  const normalized = posix.normalize(value);
+  if (normalized !== value || value.includes("//") || value.split("/").some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`${label} must not contain traversal or redundant segments`);
   }
   return value;
 }
