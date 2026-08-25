@@ -448,7 +448,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -502,7 +502,8 @@ test("locking restarts exploration in the generated environment with canonical g
   await h.commands[0].options.handler("lock", ctx);
   const lockSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
   assert.equal(lockSnapshot.phase, "implementation");
-  assert.equal(lockSnapshot.environment.identity, "project:generated");
+  assert.equal(lockSnapshot.environment.identity.startsWith("project:"), true);
+  assert.notEqual(lockSnapshot.environment.identity, "project:generated");
   assert.equal(lockSnapshot.worker.state, "stopped");
   assert.equal(lockSnapshot.worker.transientStateLost, true);
   assert.equal(lockSnapshot.transition, "contract-locked");
@@ -526,6 +527,132 @@ test("locking restarts exploration in the generated environment with canonical g
   assert.equal(loaded.details.worker.started, true);
   assert.ok(loaded.details.objects.some((object) => object.name === "input_path" && object.origin === "global"));
   assert.ok(loaded.details.objects.some((object) => object.name === "load_input" && object.origin === "global"));
+});
+
+test("governed dependency proposals validate before one approved environment commit", { timeout: 240_000 }, async (t) => {
+  const root = await repository();
+  const confirmations = [true, false, true];
+  const h = harness();
+  const ctx = context(root, [], confirmations);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.commands[0].options.handler("start", ctx);
+  const contract = await fixtureContract();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.commands[0].options.handler("lock", ctx);
+
+  const dependency = h.tools.find((tool) => tool.name === "r_dependency_propose");
+  assert.ok(dependency, "Implementation Mode must expose governed dependency proposals");
+  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  await evaluate.execute("retain-until-approval", { code: "temporary_before_environment <- 1L", targets: [] }, undefined, undefined, ctx);
+  const initialHead = await git(root, "rev-parse", "HEAD");
+  const initialContract = await readFile(join(root, "pi-r.yml"), "utf8");
+
+  await assert.rejects(
+    dependency.execute("unknown", {
+      operation: "add",
+      package: "data.tabel",
+      domain: "tabular",
+      rationale: "Misspelled package request",
+      scope: "project",
+    }, undefined, undefined, ctx),
+    /UNKNOWN_PACKAGE.*data\.table/,
+  );
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+  assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
+  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("after-resolution-failure", {}, undefined, undefined, ctx)).details.state, "running");
+
+  await assert.rejects(
+    dependency.execute("required-removal", {
+      operation: "remove",
+      package: "data.table",
+      domain: "tabular",
+      rationale: "Attempt to remove the canonical table package",
+      scope: "project",
+    }, undefined, undefined, ctx),
+    /REQUIRED_PACKAGE/,
+  );
+
+  await assert.rejects(
+    dependency.execute("prohibited", {
+      operation: "add",
+      package: "dplyr",
+      domain: "tabular",
+      rationale: "Use an alternate table API",
+      scope: "project",
+    }, undefined, undefined, ctx),
+    /PROHIBITED_PACKAGE.*data\.table/,
+  );
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+  assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
+
+  const projectOnly = await dependency.execute("add-project-package", {
+    operation: "add",
+    package: "yaml",
+    domain: "configuration",
+    rationale: "Read an approved project-only configuration format",
+    scope: "project",
+  }, undefined, undefined, ctx);
+  assert.equal(projectOnly.details.policy.status, "allowed");
+  assert.equal(projectOnly.details.proposal.scope, "project");
+  assert.equal(projectOnly.details.nextContract.dependencyApprovals.yaml.policyStatus, "allowed");
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+
+  const proposed = await dependency.execute("add-shared-package", {
+    operation: "add",
+    package: "digest",
+    domain: "hashing",
+    rationale: "Compute a reusable specialist hash",
+    scope: "shared",
+  }, undefined, undefined, ctx);
+  assert.equal(proposed.details.policy.status, "unregistered");
+  assert.equal(proposed.details.proposal.scope, "shared");
+  assert.ok(proposed.details.resolvedPackages.some((entry) => entry.name === "digest" && entry.exists && entry.available && !entry.broken));
+  assert.equal(proposed.details.nextContract.dependencies.includes("digest"), true);
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+  assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
+  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("still-running", {}, undefined, undefined, ctx)).details.state, "running");
+
+  await h.commands[0].options.handler("environment", ctx);
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("after-cancel", {}, undefined, undefined, ctx)).details.state, "running");
+  assert.match(ctx.notifications.at(-1)[0], /cancelled.*candidate preserved/i);
+
+  await h.commands[0].options.handler("environment", ctx);
+  const activatedHead = await git(root, "rev-parse", "HEAD");
+  assert.notEqual(activatedHead, initialHead);
+  assert.equal(await git(root, "rev-list", "--count", `${initialHead}..HEAD`), "1");
+  const activated = JSON.parse(await readFile(join(root, "pi-r.yml"), "utf8"));
+  assert.equal(activated.dependencies.includes("digest"), true);
+  assert.deepEqual(activated.dependencyApprovals.digest, {
+    scope: "shared",
+    domain: "hashing",
+    rationale: "Compute a reusable specialist hash",
+    policyStatus: "unregistered",
+  });
+  assert.match(await readFile(join(root, "flake.nix"), "utf8"), /rPackages\."digest"/);
+  assert.match(await readFile(join(root, "_targets.R"), "utf8"), /"data\.table", "digest"/);
+  assert.match(await git(root, "log", "-1", "--format=%B"), /Add governed R dependency digest[\s\S]*Technology-Policy: pi-r-technology-v1[\s\S]*Approval-Scope: shared/);
+  const sharedPolicy = JSON.parse(await readFile(process.env.PI_R_SHARED_POLICY_PATH, "utf8"));
+  assert.equal(sharedPolicy.packages.digest.status, "allowed");
+  assert.deepEqual(sharedPolicy.packages.digest.domains, ["hashing"]);
+  assert.equal(await git(root, "status", "--porcelain", "--untracked-files=no"), "");
+
+  const live = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(live.environment.identity.startsWith("project:"), true);
+  assert.equal(live.worker.state, "stopped");
+  assert.equal(live.worker.transientStateLost, true);
+  assert.equal(live.worker.targetsCache, "preserved");
+  assert.equal(live.transition, "environment-activated");
+  assert.deepEqual(live.objects, []);
+
+  const restarted = await evaluate.execute("new-environment", {
+    code: "requireNamespace('digest', quietly = TRUE)",
+    targets: [],
+  }, undefined, undefined, ctx);
+  assert.equal(restarted.details.value, true);
+  assert.equal(restarted.details.worker.started, true);
+  assert.equal(restarted.details.worker.environment, "project");
 });
 
 test("implementation mode lists contracted targets with bounded freshness metadata", { timeout: 60_000 }, async (t) => {
@@ -770,7 +897,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);

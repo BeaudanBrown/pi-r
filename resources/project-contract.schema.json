@@ -43,6 +43,21 @@
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
     },
+    "dependencyApprovals": {
+      "type": "object",
+      "propertyNames": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9.]{0,99}$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "domain", "rationale", "policyStatus"],
+        "properties": {
+          "scope": { "enum": ["project", "shared"] },
+          "domain": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "policyStatus": { "enum": ["required", "preferred", "allowed", "unregistered"] }
+        }
+      }
+    },
     "constants": {
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/rName" },

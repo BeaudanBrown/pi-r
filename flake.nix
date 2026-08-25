@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.10.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.11.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -29,6 +29,7 @@
             cp ${./R/artifact_inspector.R} $out/share/pi-r/R/artifact_inspector.R
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
+            cp ${./resources/technology-policy-v1.json} $out/share/pi-r/resources/technology-policy-v1.json
           '';
 
           rRuntime = pkgs.rWrapper.override {
@@ -37,7 +38,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.10.0";
+            version = "0.11.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -104,7 +105,7 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.10.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.11.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -130,6 +131,8 @@
             PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               node --test ${./tests/extension-smoke.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
+              PI_R_NIXPKGS_PATH=${pkgs.path} \
+              PI_R_SHARED_POLICY_PATH="$TMPDIR/pi-r-shared-technology-policy.json" \
               PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
               PI_R_TREE_SITTER=${pkgs.tree-sitter}/bin/tree-sitter \
@@ -151,6 +154,9 @@
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
               node --test ${./tests/contract-scaffold-cli.test.mjs}
+            PI_R_CLI=${piR}/bin/pi-r \
+              PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
+              node --test ${./tests/environment-governance-cli.test.mjs}
             PI_R_HELPER=${resources}/share/pi-r/R/pi_r_runtime.R \
               Rscript --vanilla ${./tests/runtime-smoke.R}
 

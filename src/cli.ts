@@ -7,12 +7,14 @@ import {
   VERSION,
   RecoverableError,
   checkScaffold,
+  classifyPackage,
   createEditCandidate,
   errorEnvelope,
   generateScaffold,
   inspectRFile,
   readContract,
   resourcePaths,
+  resolveContractPackages,
   summarizeContract,
 } from "./index.js";
 
@@ -72,6 +74,25 @@ async function runContract(args: string[]): Promise<void> {
   }
 }
 
+async function runPackages(args: string[]): Promise<void> {
+  try {
+    if (args.length === 3 && args[0] === "policy") {
+      printJson({ ok: true, value: classifyPackage(args[1], args[2]) });
+      return;
+    }
+    if (args.length >= 3 && args[0] === "resolve") {
+      const result = await resolveContractPackages(args[1], args.slice(2));
+      printJson({ ok: true, value: { packages: result.packages } });
+      return;
+    }
+    process.stderr.write("Usage: pi-r packages policy PACKAGE DOMAIN | pi-r packages resolve CONTRACT PACKAGE...\n");
+    process.exitCode = 2;
+  } catch (error) {
+    printJson(errorEnvelope(error));
+    process.exitCode = 1;
+  }
+}
+
 async function printPaths(asJson: boolean): Promise<void> {
   const paths = resourcePaths();
   await Promise.all(Object.values(paths).map((path) => access(path)));
@@ -82,7 +103,7 @@ async function printPaths(asJson: boolean): Promise<void> {
   }
 
   process.stdout.write(
-    `resources=${paths.resources}\nextension=${paths.extension}\nrHelper=${paths.rHelper}\n`,
+    `resources=${paths.resources}\nextension=${paths.extension}\nrHelper=${paths.rHelper}\ntechnologyPolicy=${paths.technologyPolicy}\n`,
   );
 }
 
@@ -107,8 +128,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (args[0] === "packages") {
+    await runPackages(args.slice(1));
+    return;
+  }
+
   process.stderr.write(
-    "Usage: pi-r --version | pi-r paths [--json] | pi-r r-functions ... | pi-r contract ...\n",
+    "Usage: pi-r --version | pi-r paths [--json] | pi-r r-functions ... | pi-r contract ... | pi-r packages ...\n",
   );
   process.exitCode = 2;
 }

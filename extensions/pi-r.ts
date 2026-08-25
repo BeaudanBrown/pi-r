@@ -9,6 +9,16 @@ import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerObject, type WorkerState } from "../src/workbench/r-worker.js";
 import { listTargets, runTargets } from "../src/workbench/target-runner.js";
 import { inspectArtifact, type ArtifactFacet } from "../src/workbench/artifact-inspector.js";
+import {
+  discardEnvironmentCandidate,
+  ENVIRONMENT_PATHS,
+  prepareEnvironmentCandidate,
+  readEnvironmentCandidate,
+  validateContractEnvironment,
+  type DependencyProposal,
+  type EnvironmentCandidate,
+} from "../src/workbench/environment-governance.js";
+import { declaredPackagePolicy, prepareSharedPolicyUpdate } from "../src/environment/package-governance.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
@@ -16,6 +26,7 @@ const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const ARTIFACT_TOOL = "r_artifact_inspect";
+const ENVIRONMENT_TOOL = "r_dependency_propose";
 const LIVE_STATE_MESSAGE = "pi-r-live-state";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
@@ -36,6 +47,18 @@ const ARTIFACT_INSPECT_SCHEMA = {
   properties: {
     target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" },
     facets: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["structure", "summary"] } },
+  },
+} as const;
+const DEPENDENCY_PROPOSAL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["operation", "package", "domain", "rationale", "scope"],
+  properties: {
+    operation: { enum: ["add", "remove"] },
+    package: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9.]{0,99}$" },
+    domain: { type: "string", minLength: 1, maxLength: 100 },
+    rationale: { type: "string", minLength: 1, maxLength: 1000 },
+    scope: { enum: ["project", "shared"] },
   },
 } as const;
 const TARGET_WORKSPACE_SCHEMA = {
@@ -105,7 +128,7 @@ interface WorkbenchState {
   contractState: "missing" | "present";
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
-  pendingApproval: "none" | "contract-lock";
+  pendingApproval: "none" | "contract-lock" | "environment-change";
   workerState: WorkerState;
   readOnlyRoots: string[];
   allowedTools: string[];
@@ -185,7 +208,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
     (state.contractState === "missing" || state.contractState === "present") &&
     state.policyState === "pi-r-policy-v1" &&
     typeof state.editableScopeCount === "number" &&
-    (state.pendingApproval === "none" || state.pendingApproval === "contract-lock") &&
+    (state.pendingApproval === "none" || state.pendingApproval === "contract-lock" || state.pendingApproval === "environment-change") &&
     (state.workerState === "stopped" || state.workerState === "running" || state.workerState === "crashed") &&
     Array.isArray(state.readOnlyRoots) &&
     state.readOnlyRoots.every((root) => typeof root === "string" && isAbsolute(root)) &&
@@ -282,11 +305,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let workerRegistered = false;
   let targetRegistered = false;
   let artifactRegistered = false;
+  let environmentRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
   let proposalQueue: Promise<void> = Promise.resolve();
   let editQueue: Promise<void> = Promise.resolve();
   let workerQueue: Promise<void> = Promise.resolve();
+  let environmentQueue: Promise<void> = Promise.resolve();
   let liveObjects: WorkerObject[] = [];
   let liveTransientStateLost = false;
   let liveTransition = "inactive";
@@ -365,7 +390,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools];
     const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
     const artifactTools = artifactRegistered ? [ARTIFACT_TOOL] : [];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools];
+    const environmentTools = environmentRegistered ? [ENVIRONMENT_TOOL] : [];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools, ...environmentTools];
     return safeReadTools();
   }
 
@@ -694,6 +720,55 @@ export default function piRExtension(pi: ExtensionAPI): void {
     });
   }
 
+  function registerEnvironmentTool(): void {
+    if (environmentRegistered) return;
+    environmentRegistered = true;
+    pi.registerTool({
+      name: ENVIRONMENT_TOOL,
+      label: "Propose governed R dependency change",
+      description: "Resolve and validate one package addition or removal against technology policy and pinned Nixpkgs without changing tracked source.",
+      promptSnippet: "Stage dependency changes first; only the user can approve the validated environment transaction",
+      parameters: DEPENDENCY_PROPOSAL_SCHEMA,
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
+        const operation = environmentQueue.then(async () => {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Dependency proposals require Implementation Mode");
+          }
+          const candidate = await prepareEnvironmentCandidate(
+            state.projectRoot,
+            state.head,
+            params as DependencyProposal,
+            (command, args, options) => pi.exec(command, args, options),
+          );
+          state = { ...state, pendingApproval: "environment-change" };
+          pi.appendEntry(STATE_ENTRY, state);
+          showHud(context, state);
+          return candidate;
+        });
+        environmentQueue = operation.then(() => undefined, () => undefined);
+        try {
+          const candidate = await operation;
+          const summary = {
+            operation: candidate.proposal.operation,
+            package: candidate.proposal.package,
+            scope: candidate.proposal.scope,
+            policy: candidate.policy,
+            dependencies: candidate.nextContract.dependencies,
+            resolvedPackages: candidate.resolvedPackages,
+            generatedFiles: candidate.fileHashes,
+            runtime: candidate.runtime,
+            trackedSourceChanged: false,
+            approval: "Run /r environment to review and approve this candidate",
+          };
+          return { content: [{ type: "text", text: boundedJson(summary) }], details: candidate };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+  }
+
   function enterPhase(next: WorkbenchState): void {
     previousActiveTools ??= pi.getActiveTools();
     const constrained = { ...next, allowedTools: phaseTools(next.phase) };
@@ -952,19 +1027,90 @@ export default function piRExtension(pi: ExtensionAPI): void {
     context.ui.notify(`pi-r workbench started: ${hud(next)}`, "info");
   }
 
+  async function activateEnvironmentCandidate(candidate: EnvironmentCandidate, context: CommandContext): Promise<void> {
+    if (!state || state.phase !== "implementation") throw new RecoverableError("INVALID_PHASE", "Environment activation requires Implementation Mode");
+    const currentHead = (await git(["rev-parse", "HEAD"], state.projectRoot)).stdout.trim();
+    if (candidate.expectedHead !== state.head || candidate.expectedHead !== currentHead) {
+      throw new RecoverableError("STALE_ENVIRONMENT_CANDIDATE", "Project HEAD changed after the environment candidate was validated");
+    }
+    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
+    if (dirty.stdout.trim()) throw new RecoverableError("STALE_CONTENT", "Tracked source changed after the environment candidate was validated");
+    const snapshots = new Map<string, string | undefined>();
+    for (const path of ENVIRONMENT_PATHS) snapshots.set(path, await readFile(resolve(state.projectRoot, path), "utf8").catch(() => undefined));
+    const sharedPolicy = candidate.proposal.scope === "shared" && candidate.policy.status === "unregistered"
+      ? prepareSharedPolicyUpdate(candidate.proposal.package, candidate.proposal.domain, candidate.proposal.rationale)
+      : undefined;
+    try {
+      if (sharedPolicy) {
+        await mkdir(dirname(sharedPolicy.path), { recursive: true });
+        const temporary = `${sharedPolicy.path}.pi-r-policy-tmp`;
+        await writeFile(temporary, sharedPolicy.content, "utf8");
+        await rename(temporary, sharedPolicy.path);
+      }
+      for (const path of ENVIRONMENT_PATHS) {
+        const destination = resolve(state.projectRoot, path);
+        await mkdir(dirname(destination), { recursive: true });
+        const temporary = `${destination}.pi-r-environment-tmp`;
+        await writeFile(temporary, candidate.files[path], "utf8");
+        await rename(temporary, destination);
+      }
+      await git(["add", "--", ...ENVIRONMENT_PATHS], state.projectRoot);
+      await git([
+        "commit",
+        "-m",
+        `${candidate.proposal.operation === "add" ? "Add" : "Remove"} governed R dependency ${candidate.proposal.package}`,
+        "-m",
+        `Capability: pi-r-environment-v1\nPolicy-Version: ${candidate.nextContract.policyVersion}\nTechnology-Policy: ${candidate.policyRegistryVersion}\nApproval-Scope: ${candidate.proposal.scope}`,
+        "--",
+        ...ENVIRONMENT_PATHS,
+      ], state.projectRoot);
+    } catch (error) {
+      await git(["reset", "--quiet", "HEAD", "--", ...ENVIRONMENT_PATHS], state.projectRoot, true);
+      await Promise.all(ENVIRONMENT_PATHS.map((path) => rm(`${resolve(state!.projectRoot, path)}.pi-r-environment-tmp`, { force: true })));
+      if (sharedPolicy) {
+        await rm(`${sharedPolicy.path}.pi-r-policy-tmp`, { force: true });
+        if (sharedPolicy.previous === undefined) await rm(sharedPolicy.path, { force: true });
+        else await writeFile(sharedPolicy.path, sharedPolicy.previous, "utf8");
+      }
+      for (const [path, previous] of snapshots) {
+        const destination = resolve(state.projectRoot, path);
+        if (previous === undefined) await rm(destination, { force: true });
+        else await writeFile(destination, previous, "utf8");
+      }
+      throw error;
+    }
+
+    const reset = worker
+      ? await worker.reset("Governed R environment activated")
+      : { lostObjects: 0, reason: "Governed R environment activated" };
+    worker = undefined;
+    projectRscript = candidate.runtime;
+    const head = (await git(["rev-parse", "HEAD"], state.projectRoot)).stdout.trim();
+    const next: WorkbenchState = {
+      ...state,
+      head,
+      pendingApproval: "none",
+      workerState: "stopped",
+      allowedTools: phaseTools("implementation"),
+    };
+    enterPhase(next);
+    updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "environment-activated");
+    pi.appendEntry(STATE_ENTRY, next);
+    showHud(context, next);
+    await discardEnvironmentCandidate(next.projectRoot);
+    context.ui.notify(
+      `Environment activated in ${head.slice(0, 12)}; worker restarted, transient objects lost=${reset.lostObjects}, targets cache preserved`,
+      "info",
+    );
+  }
+
   async function writeScaffoldCommit(
     contract: ProjectContract,
     files: ReadonlyMap<string, string>,
+    runtime: string,
   ): Promise<WorkbenchState> {
     if (!state) throw new Error("Workbench state disappeared");
     const root = state.projectRoot;
-    if (worker) {
-      const reset = await worker.reset("Project Contract locked; restarting in generated project environment");
-      worker = undefined;
-      projectRscript = undefined;
-      updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "contract-locked-worker-reset");
-      state = { ...state, workerState: "stopped" };
-    }
     const paths = [...files.keys()];
     const snapshots = new Map<string, string | undefined>();
     for (const path of paths) snapshots.set(path, await readFile(resolve(root, path), "utf8").catch(() => undefined));
@@ -1002,6 +1148,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
       }
       throw error;
     }
+    const reset = worker
+      ? await worker.reset("Project Contract locked; restarting in generated project environment")
+      : { lostObjects: 0 };
+    worker = undefined;
+    projectRscript = runtime;
+    updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "contract-locked-worker-reset");
     const head = (await git(["rev-parse", "HEAD"], root)).stdout.trim();
     return {
       ...state,
@@ -1025,7 +1177,24 @@ export default function piRExtension(pi: ExtensionAPI): void {
       throw new Error("No valid contract draft exists; use r_contract_propose first");
     });
     const contract = validateContract(JSON.parse(draftText));
+    for (const dependency of contract.dependencies) {
+      const decision = declaredPackagePolicy(dependency);
+      if (decision.status === "prohibited") {
+        throw new RecoverableError("PROHIBITED_PACKAGE", decision.rationale, {
+          package: dependency,
+          alternatives: decision.alternatives,
+        });
+      }
+      if (decision.status === "unregistered" && !contract.dependencyApprovals[dependency]) {
+        throw new RecoverableError("UNREGISTERED_PACKAGE", `Initial dependency requires an explicit governed approval: ${dependency}`);
+      }
+    }
     const files = renderScaffold(contract);
+    const validatedEnvironment = await validateContractEnvironment(
+      state.projectRoot,
+      contract,
+      (command, args, options) => pi.exec(command, args, options),
+    );
     const diff = await sourceDiff(state.projectRoot, files);
     state = { ...state, pendingApproval: "contract-lock" };
     showHud(context, state);
@@ -1038,10 +1207,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
       context.ui.notify("Project Contract lock cancelled; validated draft preserved", "info");
       return;
     }
-    const implementation = await writeScaffoldCommit(contract, files);
+    const implementation = await writeScaffoldCommit(contract, files, validatedEnvironment.runtime);
     registerEditTool();
     registerTargetTools();
     registerArtifactTool();
+    registerEnvironmentTool();
     enterPhase(implementation);
     updateLiveWorker([], liveTransientStateLost, "contract-locked");
     pi.appendEntry(STATE_ENTRY, implementation);
@@ -1064,6 +1234,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         registerEditTool();
         registerTargetTools();
         registerArtifactTool();
+        registerEnvironmentTool();
       }
       updateLiveWorker([], false, "session-resumed");
       enterPhase({ ...restored, workerState: "stopped" });
@@ -1092,6 +1263,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
     if ((TARGET_TOOLS as readonly string[]).includes(event.toolName) && state.phase === "implementation") return undefined;
     if (event.toolName === ARTIFACT_TOOL && state.phase === "implementation") return undefined;
+    if (event.toolName === ENVIRONMENT_TOOL && state.phase === "implementation") return undefined;
     if ((event.toolName === INSPECT_TOOL || event.toolName === EDIT_TOOL) && state.phase === "implementation") return undefined;
     if (!(READ_TOOLS as readonly string[]).includes(event.toolName)) {
       return { block: true, reason: `pi-r ${state.phase} mode permits only its compact tool set` };
@@ -1135,7 +1307,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values.";
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Propose package changes through r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values.";
     const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
@@ -1160,6 +1332,50 @@ export default function piRExtension(pi: ExtensionAPI): void {
         context.ui.notify(`${hud(state)}\n${await workerStatusText()}`, "info");
         return;
       }
+      if (subcommand === "environment") {
+        try {
+          if (!state || state.phase !== "implementation") throw new Error("Environment approval requires active Implementation Mode");
+          const storedCandidate = await readEnvironmentCandidate(state.projectRoot);
+          const candidate = await prepareEnvironmentCandidate(
+            state.projectRoot,
+            storedCandidate.expectedHead,
+            storedCandidate.proposal,
+            (command, args, options) => pi.exec(command, args, options),
+          );
+          state = { ...state, pendingApproval: "environment-change" };
+          showHud(context, state);
+          const diff = await sourceDiff(state.projectRoot, new Map(Object.entries(candidate.files)));
+          const review = [
+            `${candidate.proposal.operation} ${candidate.proposal.package} (${candidate.proposal.scope})`,
+            `Domain: ${candidate.proposal.domain}`,
+            `Rationale: ${candidate.proposal.rationale}`,
+            `Policy: ${candidate.policy.status} — ${candidate.policy.rationale}`,
+            `Resolved: ${candidate.resolvedPackages.map((entry) => `${entry.name}@${entry.version ?? "unknown"}`).join(", ")}`,
+            `Runtime: ${candidate.runtime}`,
+            "",
+            "Generated-source diff",
+            diff || "(no generated changes)",
+            "",
+            "Approval will create one provenance commit, restart the R worker, discard Transient State, and preserve the targets cache.",
+          ].join("\n");
+          if (!context.ui.confirm) throw new Error("Environment activation requires an interactive confirmation UI");
+          const approved = await context.ui.confirm("Activate governed R environment?", review);
+          if (!approved) {
+            state = { ...state, pendingApproval: "none" };
+            showHud(context, state);
+            context.ui.notify("Environment activation cancelled; validated candidate preserved", "info");
+            return;
+          }
+          await activateEnvironmentCandidate(candidate, context);
+        } catch (error) {
+          if (state?.pendingApproval === "environment-change") {
+            state = { ...state, pendingApproval: "none" };
+            showHud(context, state);
+          }
+          context.ui.notify(`pi-r environment failed: ${actionableToolError(error).message}`, "error");
+        }
+        return;
+      }
       if (subcommand === "lock") {
         try {
           await lock(context);
@@ -1168,12 +1384,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
             state = { ...state, pendingApproval: "none" };
             showHud(context, state);
           }
-          context.ui.notify(`pi-r lock failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          context.ui.notify(`pi-r lock failed: ${actionableToolError(error).message}`, "error");
         }
         return;
       }
       if (subcommand !== "start") {
-        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock", "warning");
+        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock | /r environment", "warning");
         return;
       }
       try {

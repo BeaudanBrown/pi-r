@@ -53,6 +53,8 @@ Implementation Mode can list and run only contracted targets through a separate 
 
 A general target-backed inspector reports bounded table, object, and file structure without returning table rows or object values. Optional summaries, stable availability errors, and metadata-hash cache invalidation keep repeated inspection concise. See [Target-backed artifact inspection](docs/artifact-inspection.md).
 
+Package additions and removals pass through versioned technology policy, exact pinned-Nixpkgs resolution, ignored candidate staging, and user-only transactional activation. Failed proposals preserve the active environment and worker; successful approval creates one provenance commit and explicitly resets Transient State while retaining the targets cache. See [Governed R package environments](docs/environment-governance.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

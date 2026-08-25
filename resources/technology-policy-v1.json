@@ -1,0 +1,78 @@
+{
+  "version": "pi-r-technology-v1",
+  "policyVersion": "pi-r-policy-v1",
+  "packages": {
+    "jsonlite": {
+      "status": "required",
+      "domains": ["runtime", "serialization"],
+      "rationale": "Structured protocol and contract serialization runtime",
+      "alternatives": []
+    },
+    "targets": {
+      "status": "required",
+      "domains": ["pipeline"],
+      "rationale": "Canonical pipeline orchestration package",
+      "alternatives": []
+    },
+    "qs2": {
+      "status": "required",
+      "domains": ["serialization"],
+      "rationale": "Maintained storage backend used by targets format qs",
+      "alternatives": []
+    },
+    "data.table": {
+      "status": "required",
+      "domains": ["tabular"],
+      "rationale": "Canonical tabular representation and transformation package",
+      "alternatives": []
+    },
+    "ggplot2": {
+      "status": "preferred",
+      "domains": ["visualization"],
+      "rationale": "Preferred declarative plotting package",
+      "alternatives": []
+    },
+    "arrow": {
+      "status": "preferred",
+      "domains": ["columnar-io"],
+      "rationale": "Preferred Arrow and Parquet interoperability package",
+      "alternatives": []
+    },
+    "yaml": {
+      "status": "allowed",
+      "domains": ["configuration", "serialization"],
+      "rationale": "Allowed structured configuration format",
+      "alternatives": ["jsonlite"]
+    },
+    "DBI": {
+      "status": "allowed",
+      "domains": ["database"],
+      "rationale": "Standard database interface abstraction",
+      "alternatives": []
+    },
+    "dplyr": {
+      "status": "prohibited",
+      "domains": ["tabular"],
+      "rationale": "Tabular transformations must use the project-standard data.table interface",
+      "alternatives": ["data.table"]
+    },
+    "tibble": {
+      "status": "prohibited",
+      "domains": ["tabular"],
+      "rationale": "Durable tabular objects must use data.table rather than tibble",
+      "alternatives": ["data.table"]
+    },
+    "renv": {
+      "status": "prohibited",
+      "domains": ["environment"],
+      "rationale": "Project environments are resolved exclusively through pinned Nixpkgs",
+      "alternatives": []
+    },
+    "qs": {
+      "status": "prohibited",
+      "domains": ["serialization"],
+      "rationale": "The legacy qs package is deprecated and broken in pinned Nixpkgs",
+      "alternatives": ["qs2"]
+    }
+  }
+}

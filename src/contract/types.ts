@@ -28,12 +28,20 @@ export interface TargetDefinition {
   pattern?: { kind: PatternKind; over: string[] };
 }
 
+export interface DependencyApproval {
+  scope: "project" | "shared";
+  domain: string;
+  rationale: string;
+  policyStatus: "required" | "preferred" | "allowed" | "unregistered";
+}
+
 export interface ProjectContract {
   contractVersion: 1;
   templateVersion: "pi-r-template-v1";
   policyVersion: "pi-r-policy-v1";
   project: { name: string; nixpkgs: NixpkgsPin };
   dependencies: string[];
+  dependencyApprovals: Record<string, DependencyApproval>;
   constants: Record<string, ConstantValue>;
   functions: ApprovedFunction[];
   targets: TargetDefinition[];

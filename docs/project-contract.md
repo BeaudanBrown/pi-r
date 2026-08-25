@@ -14,6 +14,7 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 - A controlled file target declares its exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects tracked paths and canonical path escapes.
 - Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
 - Contract, template, policy, and Nixpkgs revisions are pinned.
+- Dependencies resolve only from pinned Nixpkgs. Optional `dependencyApprovals` entries record the domain, rationale, original policy status, and project/shared scope of reviewed choices; see [Governed R package environments](environment-governance.md).
 
 ## Generated ownership
 

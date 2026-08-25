@@ -125,6 +125,7 @@ export function validateContract(input: unknown): ProjectContract {
       "policyVersion",
       "project",
       "dependencies",
+      "dependencyApprovals",
       "constants",
       "functions",
       "targets",
@@ -148,6 +149,26 @@ export function validateContract(input: unknown): ProjectContract {
   }
 
   const dependencies = stringArray(root.dependencies, "dependencies").sort();
+  const approvalsInput = root.dependencyApprovals === undefined ? {} : object(root.dependencyApprovals, "dependencyApprovals");
+  const dependencyApprovals = Object.fromEntries(Object.keys(approvalsInput).sort().map((name) => {
+    if (!/^[A-Za-z][A-Za-z0-9.]{0,99}$/.test(name)) invalid(`dependencyApprovals.${name} must name an R package`);
+    if (!dependencies.includes(name)) invalid(`dependencyApprovals.${name} must refer to a declared dependency`);
+    const path = `dependencyApprovals.${name}`;
+    const approval = object(approvalsInput[name], path);
+    exactKeys(approval, ["scope", "domain", "rationale", "policyStatus"], path);
+    const scope = string(approval.scope, `${path}.scope`);
+    if (scope !== "project" && scope !== "shared") invalid(`${path}.scope must be project or shared`);
+    const policyStatus = string(approval.policyStatus, `${path}.policyStatus`);
+    if (!["required", "preferred", "allowed", "unregistered"].includes(policyStatus)) {
+      invalid(`${path}.policyStatus is not approvable`);
+    }
+    return [name, {
+      scope: scope as "project" | "shared",
+      domain: string(approval.domain, `${path}.domain`),
+      rationale: string(approval.rationale, `${path}.rationale`),
+      policyStatus: policyStatus as "required" | "preferred" | "allowed" | "unregistered",
+    }];
+  }));
   const constantsInput = object(root.constants, "constants");
   const constants = Object.fromEntries(
     Object.keys(constantsInput)
@@ -255,6 +276,7 @@ export function validateContract(input: unknown): ProjectContract {
       },
     },
     dependencies,
+    dependencyApprovals,
     constants,
     functions,
     targets,

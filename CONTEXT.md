@@ -87,3 +87,15 @@ _Avoid_: Dump, preview
 **Observed Metadata**:
 Cached Artifact Envelope observations tied to a `targets` data hash and invalidated when that hash changes.
 _Avoid_: Target metadata, durable state
+
+**Technology Policy**:
+The versioned shared classification of required, preferred, allowed, and prohibited R packages by problem domain.
+_Avoid_: Package list, recommendations
+
+**Environment Candidate**:
+One ignored package-change transaction whose policy decision, pinned-Nixpkgs resolution, generated files, package loads, and immutable R runtime have been validated without changing the active environment.
+_Avoid_: Draft flake, pending install
+
+**Environment Activation**:
+The user-approved publication of an Environment Candidate in one Provenance Commit followed by a Persistent R Worker restart while preserving the targets cache.
+_Avoid_: Hot reload, package installation
