@@ -7,14 +7,15 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 ## Contract rules
 
 - Every approved function lists only required parameter names. Defaults and variadic arguments are not representable.
-- Every target calls exactly one approved function. Its named arguments exactly match that function's parameters.
+- Every target calls exactly one approved function. Its named arguments plus any explicit file output binding exactly match that function's parameters.
 - Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
 - Target references must form an acyclic graph.
 - Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`, which current `targets` implements with the maintained `qs2` package; file artifacts generate `format = "file"`.
-- A controlled file target declares one exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects canonical path escapes and tracked paths except for the same target's explicitly versioned deliverable.
+- A controlled file target declares one exact writable project-local output through `output: { parameter, constant }`. The parameter is omitted from ordinary arguments, belongs to the Approved Function, and receives the referenced safe project-relative string constant. Legacy locked contracts using inferred path-parameter names remain readable. Target execution rejects canonical path escapes and tracked paths except for the same target's explicitly versioned deliverable.
 - Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
 - Optional versioned `deliverables` bind a non-dynamic file target to its exact output path. Other file-target outputs are ignored exactly; see [Versioned deliverable publication](deliverable-publication.md).
-- Contract, template, policy, and Nixpkgs revisions are pinned.
+- Zero Approved Functions and zero targets represent a semantically empty pipeline; generation still emits valid targets infrastructure ending in `list()` without placeholders.
+- Contract, template, policy, and Nixpkgs revisions are pinned. The model-facing proposal omits these authority-owned values; pi-r injects versions and the exact Nixpkgs input used to package the workbench.
 - Dependencies resolve only from pinned Nixpkgs. Optional `dependencyApprovals` entries record the domain, rationale, original policy status, and project/shared scope of reviewed choices; see [Governed R package environments](environment-governance.md).
 
 ## Generated ownership

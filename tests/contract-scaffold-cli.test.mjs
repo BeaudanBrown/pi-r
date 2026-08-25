@@ -91,7 +91,7 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
   assert.match(targets, /summarise_groups\(input = raw_data, config = config\)/);
   assert.match(targets, /make_config\(threshold = PI_R_CONSTANTS\$threshold\), format = "qs"/);
   assert.match(targets, /format = "qs", pattern = map\(raw_data\)/);
-  assert.match(targets, /format = "file", pattern = cross\(summaries, config\)/);
+  assert.match(targets, /write_result\(table = summaries, config = config, output_path = PI_R_CONSTANTS\$output_path\), format = "file", pattern = cross\(summaries, config\)/);
   assert.match(targets, /tar_option_set\(packages = c\("data.table"\), workspace_on_error = TRUE\)/);
   assert.match(firstSnapshot["R/constants.R"], /input_path = "data\/input\.qs"[\s\S]*output_path = "artifacts\/report\.qs"[\s\S]*threshold = 0\.5/);
   assert.match(firstSnapshot["flake.nix"], /rPackages\."data_table"/);
@@ -111,6 +111,18 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
   ]);
 });
 
+test("legacy inferred file-output bindings remain readable", async () => {
+  const initial = await outputDirectory();
+  assert.equal((await run(["contract", "generate", contract, initial])).code, 0);
+  const definition = JSON.parse(await readFile(join(initial, "pi-r.yml"), "utf8"));
+  const report = definition.targets.find((target) => target.name === "report");
+  report.arguments[report.output.parameter] = { constant: report.output.constant };
+  delete report.output;
+  const source = join(await mkdtemp(join(tmpdir(), "pi-r-legacy-contract-")), "contract.json");
+  await writeFile(source, JSON.stringify(definition));
+  assert.equal((await run(["contract", "validate", source])).code, 0);
+});
+
 test("declared deliverables remain versionable while exact undeclared file outputs are ignored", async () => {
   const initial = await outputDirectory();
   assert.equal((await run(["contract", "generate", contract, initial])).code, 0);
@@ -124,8 +136,8 @@ test("declared deliverables remain versionable while exact undeclared file outpu
     arguments: {
       table: { target: "summaries" },
       config: { target: "config" },
-      output_path: { constant: "scratch_path" },
     },
+    output: { parameter: "output_path", constant: "scratch_path" },
   });
   definition.deliverables = [{ target: "report", path: "artifacts/report.qs" }];
   const source = join(await mkdtemp(join(tmpdir(), "pi-r-deliverable-contract-")), "contract.json");
@@ -142,6 +154,34 @@ test("declared deliverables remain versionable while exact undeclared file outpu
   const invalid = await run(["contract", "validate", source]);
   assert.equal(invalid.code, 1);
   assert.match(JSON.parse(invalid.stdout).error.message, /project-relative portable path|traversal/);
+});
+
+test("an empty design generates a valid target project without placeholder functions or targets", async () => {
+  const source = join(await mkdtemp(join(tmpdir(), "pi-r-empty-contract-")), "contract.json");
+  await writeFile(source, JSON.stringify({
+    contractVersion: 1,
+    templateVersion: "pi-r-template-v1",
+    policyVersion: "pi-r-policy-v1",
+    project: {
+      name: "empty-analysis",
+      nixpkgs: {
+        owner: "NixOS",
+        repo: "nixpkgs",
+        rev: "1111111111111111111111111111111111111111",
+        narHash: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        lastModified: 1700000000,
+      },
+    },
+    dependencies: [],
+    constants: {},
+    functions: [],
+    targets: [],
+  }));
+  const output = await outputDirectory();
+  const generated = await run(["contract", "generate", source, output]);
+  assert.equal(generated.code, 0, generated.stderr);
+  assert.deepEqual((await filesBelow(join(output, "R"))).sort(), ["constants.R"]);
+  assert.match(await readFile(join(output, "_targets.R"), "utf8"), /list\(\s*\)\s*$/);
 });
 
 test("contract checking detects machine-owned drift but permits function body implementation", async () => {

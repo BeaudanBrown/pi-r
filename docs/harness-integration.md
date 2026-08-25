@@ -14,7 +14,8 @@ Pi-r is implemented in this repository and distributed as immutable resources. P
 - `sandbox`;
 - `worker`, `targetRunner`, `artifactInspector`, and `contractReader`;
 - `technologyPolicy`; and
-- the exact `nixpkgs` source used for deterministic dependency resolution.
+- the exact `nixpkgs` source used for deterministic dependency resolution;
+- an immutable JSON description of that source's owner, repository, revision, NAR hash, and timestamp, used to normalize model-facing Contract Drafts locally.
 
 The package also exposes `passthru.piResources` for generic Nix consumers. Paths are Nix-store identities rather than mutable checkout paths.
 

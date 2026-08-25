@@ -9,6 +9,7 @@ import {
   type ArgumentReference,
   type ConstantValue,
   type ContractSummary,
+  type NixpkgsPin,
   type ProjectContract,
   type TargetDefinition,
 } from "./types.js";
@@ -116,6 +117,32 @@ function assertAcyclic(targets: TargetDefinition[]): void {
   for (const target of targets) visit(target.name);
 }
 
+export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): ProjectContract {
+  const proposal = object(input, "proposal");
+  exactKeys(
+    proposal,
+    ["project", "dependencies", "dependencyApprovals", "deliverables", "constants", "functions", "targets"],
+    "proposal",
+  );
+  const project = object(proposal.project, "proposal.project");
+  exactKeys(project, ["name"], "proposal.project");
+  if (Array.isArray(proposal.targets)) {
+    proposal.targets.forEach((entry, index) => {
+      const target = object(entry, `proposal.targets[${index}]`);
+      if (target.artifact === "file" && target.output === undefined) {
+        invalid(`proposal.targets[${index}] file target must declare output { parameter, constant }`);
+      }
+    });
+  }
+  return validateContract({
+    contractVersion: 1,
+    templateVersion: "pi-r-template-v1",
+    policyVersion: "pi-r-policy-v1",
+    ...proposal,
+    project: { name: project.name, nixpkgs },
+  });
+}
+
 export function validateContract(input: unknown): ProjectContract {
   const root = object(input, "contract");
   exactKeys(
@@ -145,7 +172,7 @@ export function validateContract(input: unknown): ProjectContract {
   const rev = string(pinInput.rev, "project.nixpkgs.rev");
   if (!/^[0-9a-f]{40}$/.test(rev)) invalid("project.nixpkgs.rev must be a full Git revision");
   const narHash = string(pinInput.narHash, "project.nixpkgs.narHash");
-  if (!narHash.startsWith("sha256-")) invalid("project.nixpkgs.narHash must be an SRI sha256 hash");
+  if (!/^sha256-[A-Za-z0-9+/]{43}=$/.test(narHash)) invalid("project.nixpkgs.narHash must be a complete SRI sha256 hash");
   if (!Number.isInteger(pinInput.lastModified) || (pinInput.lastModified as number) <= 0) {
     invalid("project.nixpkgs.lastModified must be a positive integer");
   }
@@ -178,7 +205,7 @@ export function validateContract(input: unknown): ProjectContract {
       .map((name) => [rName(name, `constants.${name}`), constantValue(constantsInput[name], `constants.${name}`)]),
   );
   const functionsInput = root.functions;
-  if (!Array.isArray(functionsInput) || functionsInput.length === 0) invalid("functions must be a non-empty array");
+  if (!Array.isArray(functionsInput)) invalid("functions must be an array");
   const functions = functionsInput.map((entry, index) => {
     const fn = object(entry, `functions[${index}]`);
     exactKeys(fn, ["name", "parameters"], `functions[${index}]`);
@@ -190,12 +217,12 @@ export function validateContract(input: unknown): ProjectContract {
   if (new Set(functions.map((fn) => fn.name)).size !== functions.length) invalid("function names must be unique");
 
   const targetsInput = root.targets;
-  if (!Array.isArray(targetsInput) || targetsInput.length === 0) invalid("targets must be a non-empty array");
+  if (!Array.isArray(targetsInput)) invalid("targets must be an array");
   if (targetsInput.length > 200) invalid("targets must contain at most 200 entries");
   const targets: TargetDefinition[] = targetsInput.map((entry, index) => {
     const path = `targets[${index}]`;
     const target = object(entry, path);
-    exactKeys(target, ["name", "function", "artifact", "arguments", "pattern"], path);
+    exactKeys(target, ["name", "function", "artifact", "arguments", "output", "pattern"], path);
     const artifact = string(target.artifact, `${path}.artifact`);
     if (!(ARTIFACT_KINDS as readonly string[]).includes(artifact)) {
       invalid(`${path}.artifact must be table, object, or file`);
@@ -207,6 +234,15 @@ export function validateContract(input: unknown): ProjectContract {
         reference(argumentsInput[name], `${path}.arguments.${name}`),
       ]),
     );
+    let output: TargetDefinition["output"];
+    if (target.output !== undefined) {
+      const outputInput = object(target.output, `${path}.output`);
+      exactKeys(outputInput, ["parameter", "constant"], `${path}.output`);
+      output = {
+        parameter: rName(outputInput.parameter, `${path}.output.parameter`),
+        constant: rName(outputInput.constant, `${path}.output.constant`),
+      };
+    }
     let pattern: TargetDefinition["pattern"];
     if (target.pattern !== undefined) {
       const patternInput = object(target.pattern, `${path}.pattern`);
@@ -224,6 +260,7 @@ export function validateContract(input: unknown): ProjectContract {
       function: rName(target.function, `${path}.function`),
       artifact: artifact as "table" | "object" | "file",
       arguments: args,
+      ...(output ? { output } : {}),
       ...(pattern ? { pattern } : {}),
     };
   });
@@ -236,11 +273,24 @@ export function validateContract(input: unknown): ProjectContract {
     const fn = functionByName.get(target.function);
     if (!fn) invalid(`target '${target.name}' calls an unapproved function`, { function: target.function });
     const argumentNames = Object.keys(target.arguments);
+    if (target.output && argumentNames.includes(target.output.parameter)) {
+      invalid(`file target '${target.name}' output parameter must not be duplicated in arguments`);
+    }
+    const boundNames = [...argumentNames, ...(target.output ? [target.output.parameter] : [])];
     if (
-      argumentNames.length !== fn.parameters.length ||
-      fn.parameters.some((parameter) => !argumentNames.includes(parameter))
+      boundNames.length !== fn.parameters.length ||
+      fn.parameters.some((parameter) => !boundNames.includes(parameter))
     ) {
-      invalid(`target '${target.name}' arguments must exactly match required function parameters`);
+      invalid(`target '${target.name}' arguments and explicit output must exactly match required function parameters`);
+    }
+    if (target.output && target.artifact !== "file") {
+      invalid(`non-file target '${target.name}' must not declare an output`);
+    }
+    if (target.output) {
+      const outputValue = constants[target.output.constant];
+      if (typeof outputValue !== "string") {
+        invalid(`file target '${target.name}' output must reference a string constant`);
+      }
     }
     for (const argument of Object.values(target.arguments)) {
       if ("target" in argument && !targetNames.has(argument.target)) {

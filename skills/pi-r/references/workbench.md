@@ -6,7 +6,45 @@ Only `/r` is registered. No R-specific tool or runtime guidance is active. `/r s
 
 ## Design Mode
 
-The active surface is read-only plus contract proposal and bounded R exploration/status/reset capabilities. `r_contract_propose` replaces one ignored draft. User-only `/r lock` validates the draft again, previews semantic and generated-source changes, publishes the deterministic scaffold transactionally, and creates one provenance commit.
+The active surface is read-only plus contract proposal and bounded R exploration/status/reset capabilities. `r_contract_propose` replaces one ignored draft. The proposal contains only project decisions; pi-r injects `contractVersion`, `templateVersion`, `policyVersion`, and the exact packaged Nixpkgs pin locally. Never invent revision, hash, or timestamp placeholders. User-only `/r lock` validates the draft again, previews semantic and generated-source changes, publishes the deterministic scaffold transactionally, and creates one provenance commit.
+
+A semantically empty design is valid:
+
+```json
+{
+  "project": { "name": "empty-analysis" },
+  "dependencies": [],
+  "constants": {},
+  "functions": [],
+  "targets": []
+}
+```
+
+It generates required targets infrastructure ending in `list()`, without placeholder Approved Functions or targets.
+
+File outputs are explicit rather than inferred from parameter names:
+
+```json
+{
+  "project": { "name": "report-analysis" },
+  "dependencies": [],
+  "constants": { "report_path": "output/report.csv" },
+  "functions": [
+    { "name": "write_report", "parameters": ["output_path"] }
+  ],
+  "targets": [
+    {
+      "name": "report",
+      "function": "write_report",
+      "artifact": "file",
+      "arguments": {},
+      "output": { "parameter": "output_path", "constant": "report_path" }
+    }
+  ]
+}
+```
+
+The `output.parameter` must name an Approved Function parameter omitted from `arguments`; `output.constant` must name one safe project-relative string constant. Every other Approved Function parameter is bound exactly once through `arguments`. Any referenced upstream target must also be declared in the complete proposal.
 
 ## Implementation Mode
 

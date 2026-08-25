@@ -25,6 +25,7 @@ export interface TargetDefinition {
   function: string;
   artifact: ArtifactKind;
   arguments: Record<string, ArgumentReference>;
+  output?: { parameter: string; constant: string };
   pattern?: { kind: PatternKind; over: string[] };
 }
 

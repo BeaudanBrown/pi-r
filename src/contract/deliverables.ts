@@ -26,6 +26,10 @@ export function fileTargetOutputs(
   constants: Readonly<Record<string, ConstantValue>>,
 ): string[] {
   if (target.artifact !== "file") return [];
+  if (target.output) {
+    const value = constants[target.output.constant];
+    return typeof value === "string" ? [value] : [];
+  }
   return Object.entries(target.arguments)
     .filter(([parameter, reference]) => OUTPUT_PARAMETER.test(parameter) && "constant" in reference)
     .flatMap(([, reference]) => {

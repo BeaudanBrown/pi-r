@@ -22,6 +22,16 @@ async function fixtureContract() {
   return JSON.parse(await readFile(join(output, "pi-r.yml"), "utf8"));
 }
 
+function proposalForContract(contract) {
+  const {
+    contractVersion: _contractVersion,
+    templateVersion: _templateVersion,
+    policyVersion: _policyVersion,
+    ...withoutVersions
+  } = contract;
+  return { ...withoutVersions, project: { name: contract.project.name } };
+}
+
 async function targetOperationsContract() {
   const contract = await fixtureContract();
   return {
@@ -38,7 +48,8 @@ async function targetOperationsContract() {
         name: "answer",
         function: "write_answer",
         artifact: "file",
-        arguments: { seed: { constant: "seed" }, output_path: { constant: "output_path" } },
+        arguments: { seed: { constant: "seed" } },
+        output: { parameter: "output_path", constant: "output_path" },
       },
       {
         name: "broken",
@@ -231,6 +242,16 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   const patterns = h.tools.flatMap((tool) => schemaPatterns(tool.parameters));
   assert.ok(patterns.length > 0);
   assert.equal(patterns.every((pattern) => pattern.startsWith("^") && pattern.endsWith("$")), true, `local llama.cpp requires anchored JSON Schema patterns: ${patterns.join(", ")}`);
+  const skillPath = join(process.env.PI_R_RESOURCE_ROOT, "skills/pi-r/SKILL.md");
+  assert.equal(await h.handlers.get("tool_call")({ toolName: "read", input: { path: skillPath } }, ctx), undefined);
+  assert.equal(
+    await h.handlers.get("tool_call")({ toolName: "read", input: { path: join(process.env.PI_R_RESOURCE_ROOT, "skills/pi-r/references/workbench.md") } }, ctx),
+    undefined,
+  );
+  assert.deepEqual(
+    await h.handlers.get("tool_call")({ toolName: "read", input: { path: join(process.env.PI_R_RESOURCE_ROOT, "extensions/pi-r.ts") } }, ctx),
+    { block: true, reason: "pi-r read path is outside approved read-only roots" },
+  );
   assert.match(ctx.widgets.at(-1)[1][0], /phase=design .*branch=pi-r\/workbench@[0-9a-f]{7,}/);
   assert.match(ctx.widgets.at(-1)[1][0], /contract=missing policy=pi-r-policy-v1 scopes=0 approval=none worker=stopped/);
 
@@ -437,13 +458,20 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   const proposal = h.tools.find((tool) => tool.name === "r_contract_propose");
   assert.ok(proposal);
   const contract = await fixtureContract();
-  const proposed = await proposal.execute("proposal-1", contract, undefined, undefined, ctx);
+  const proposalInput = proposalForContract((contract));
+  const proposed = await proposal.execute("proposal-1", proposalInput, undefined, undefined, ctx);
 
   assert.match(proposed.content[0].text, /Functions and signatures[\s\S]*Target graph/);
   assert.equal(await git(root, "check-ignore", ".pi/tmp/pi-r-contract-draft.json"), ".pi/tmp/pi-r-contract-draft.json");
   assert.equal(await git(root, "status", "--porcelain"), "");
   const draftBeforeInvalid = await readFile(join(root, ".pi/tmp/pi-r-contract-draft.json"), "utf8");
-  const invalid = structuredClone(contract);
+  const draftContract = JSON.parse(draftBeforeInvalid);
+  assert.deepEqual(draftContract.project.nixpkgs, JSON.parse(await readFile(process.env.PI_R_NIXPKGS_PIN_PATH, "utf8")));
+  await assert.rejects(
+    proposal.execute("proposal-authority", { ...proposalInput, policyVersion: "pi-r-policy-v999" }, undefined, undefined, ctx),
+    /proposal rejected.*unknown fields/i,
+  );
+  const invalid = structuredClone(proposalInput);
   invalid.targets[0].function = "not_approved";
   await assert.rejects(
     proposal.execute("proposal-2", invalid, undefined, undefined, ctx),
@@ -515,8 +543,7 @@ test("locking restarts exploration in the generated environment with canonical g
   const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
   await evaluate.execute("design-state", { code: "design_only <- 99L", targets: [] }, undefined, undefined, ctx);
   const contract = await fixtureContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
   const lockSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
   assert.equal(lockSnapshot.phase, "implementation");
@@ -555,8 +582,7 @@ test("governed dependency proposals validate before one approved environment com
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
 
   const dependency = h.tools.find((tool) => tool.name === "r_dependency_propose");
@@ -743,8 +769,7 @@ test("implementation mode lists contracted targets with bounded freshness metada
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
 
   const listTargets = h.tools.find((tool) => tool.name === "r_targets_list");
@@ -768,8 +793,7 @@ test("target execution requires explicit contracted names and stores complete lo
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
   const contract = await targetOperationsContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
   const runTargets = h.tools.find((tool) => tool.name === "r_targets_run");
   assert.ok(runTargets, "Implementation Mode must expose controlled target execution");
@@ -811,7 +835,7 @@ test("target execution requires explicit contracted names and stores complete lo
 
   const head = await git(root, "rev-parse", "HEAD");
   const result = await runTargets.execute("run-answer", { names: ["answer"], all: false }, undefined, undefined, ctx);
-  assert.equal(result.details.status, "succeeded");
+  assert.equal(result.details.status, "succeeded", JSON.stringify(result.details));
   assert.deepEqual(result.details.requested, ["answer"]);
   assert.equal(await readFile(join(root, "artifacts/answer.txt"), "utf8"), "42\n");
   assert.match(await readFile(result.details.logPath, "utf8"), /operation=run[\s\S]*answer/);
@@ -967,8 +991,7 @@ test("implementation mode commits only validated Approved Function body edits", 
   const ctx = context(root, [], [true]);
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
   const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
@@ -1023,8 +1046,7 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
   const ctx = context(root, [], [true]);
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
-  await h.tools.find((tool) => tool.name === "r_contract_propose")
-    .execute("proposal", contract, undefined, undefined, ctx);
+  await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
   const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");

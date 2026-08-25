@@ -52,7 +52,13 @@ function targetExpression(target: TargetDefinition, contract: ProjectContract): 
   const fn = contract.functions.find((candidate) => candidate.name === target.function);
   if (!fn) throw new Error(`Validated function '${target.function}' disappeared`);
   const callArguments = fn.parameters
-    .map((parameter) => `${parameter} = ${argumentExpression(target.arguments[parameter])}`)
+    .map((parameter) => {
+      const reference = target.arguments[parameter] ?? (
+        target.output?.parameter === parameter ? { constant: target.output.constant } : undefined
+      );
+      if (!reference) throw new Error(`Validated target '${target.name}' lost parameter '${parameter}'`);
+      return `${parameter} = ${argumentExpression(reference)}`;
+    })
     .join(", ");
   const format = target.artifact === "file" ? "file" : "qs";
   const pattern = target.pattern

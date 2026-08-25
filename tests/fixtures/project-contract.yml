@@ -56,8 +56,9 @@ targets:
         target: summaries
       config:
         target: config
-      output_path:
-        constant: output_path
+    output:
+      parameter: output_path
+      constant: output_path
     pattern:
       kind: cross
       over: [summaries, config]

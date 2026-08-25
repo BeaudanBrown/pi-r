@@ -11,8 +11,13 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          nixpkgsPin = pkgs.writeText "pi-r-nixpkgs-pin.json" (builtins.toJSON {
+            owner = "NixOS";
+            repo = "nixpkgs";
+            inherit (nixpkgs) rev narHash lastModified;
+          });
 
-          piResources = pkgs.runCommand "pi-r-resources-0.14.1" {
+          piResources = pkgs.runCommand "pi-r-resources-0.15.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources $out/share/pi-r/skills/pi-r/references $out/share/pi-r/docs
@@ -35,6 +40,7 @@
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
             cp ${./resources/technology-policy-v1.json} $out/share/pi-r/resources/technology-policy-v1.json
+            cp ${nixpkgsPin} $out/share/pi-r/resources/nixpkgs-pin.json
             cp ${./skills/pi-r/SKILL.md} $out/share/pi-r/skills/pi-r/SKILL.md
             cp ${./skills/pi-r/references/workbench.md} $out/share/pi-r/skills/pi-r/references/workbench.md
             cp ${self}/docs/*.md $out/share/pi-r/docs/
@@ -46,7 +52,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.14.1";
+            version = "0.15.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -70,6 +76,7 @@
                 --add-flags "$out/lib/pi-r/cli.mjs" \
                 --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bubblewrap pkgs.tree-sitter rRuntime ]}" \
                 --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
+                --set-default PI_R_NIXPKGS_PIN_PATH "${piResources}/share/pi-r/resources/nixpkgs-pin.json" \
                 --set-default PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
                 --set-default PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
                 --set-default PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
@@ -106,6 +113,7 @@
                 artifactInspector = "${piResources}/share/pi-r/R/artifact_inspector.R";
                 contractReader = "${piResources}/share/pi-r/R/read_contract.R";
                 technologyPolicy = "${piResources}/share/pi-r/resources/technology-policy-v1.json";
+                nixpkgsPin = "${piResources}/share/pi-r/resources/nixpkgs-pin.json";
               };
               piResources = {
                 extensions = [ "${piResources}/share/pi-r/extensions/pi-r.ts" ];
@@ -137,8 +145,8 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.14.1" {
-            nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
+          verify = pkgs.runCommand "pi-r-verification-0.15.0" {
+            nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.jq pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME" "$TMPDIR/extension"
@@ -159,6 +167,8 @@
             test -f ${piR.resourcePaths.artifactInspector}
             test -f ${piR.resourcePaths.contractReader}
             test -f ${piR.resourcePaths.technologyPolicy}
+            test -f ${piR.resourcePaths.nixpkgsPin}
+            jq -e '.owner == "NixOS" and .repo == "nixpkgs" and (.rev | test("^[0-9a-f]{40}$")) and (.narHash | test("^sha256-.+=$")) and (.lastModified > 0)' ${piR.resourcePaths.nixpkgsPin} >/dev/null
             grep -Fx 'name: pi-r' ${piR.resourcePaths.skill} >/dev/null
 
             legacy_format="$(printf 'r\144s')"
@@ -184,6 +194,8 @@
               node --test ${./tests/dependency-scout-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_NIXPKGS_PATH=${pkgs.path} \
+              PI_R_NIXPKGS_PIN_PATH=${piR.resourcePaths.nixpkgsPin} \
+              PI_R_RESOURCE_ROOT=${piR.resourcePaths.root} \
               PI_R_SHARED_POLICY_PATH="$TMPDIR/pi-r-shared-technology-policy.json" \
               PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               PI_R_SCOUT_EXTENSION=${resources}/share/pi-r/extensions/pi-r-dependency-scout.ts \

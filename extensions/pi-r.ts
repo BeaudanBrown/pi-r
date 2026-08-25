@@ -2,7 +2,9 @@ import { access, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
-import { validateContract } from "../src/contract/contract.js";
+import { normalizeContractProposal, validateContract } from "../src/contract/contract.js";
+import { fileTargetOutputs } from "../src/contract/deliverables.js";
+import type { NixpkgsPin } from "../src/contract/types.js";
 import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
 import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
@@ -34,6 +36,17 @@ const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-live-state";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
+const CONTRACT_PROPOSAL_SCHEMA = (() => {
+  const schema = structuredClone(contractSchema) as Record<string, any>;
+  schema.required = schema.required.filter((name: string) => !["contractVersion", "templateVersion", "policyVersion"].includes(name));
+  delete schema.properties.contractVersion;
+  delete schema.properties.templateVersion;
+  delete schema.properties.policyVersion;
+  schema.properties.project.required = ["name"];
+  delete schema.properties.project.properties.nixpkgs;
+  return schema;
+})();
+
 const EVALUATE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -340,6 +353,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let scoutRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
+
+  const resourceRoot = process.env.PI_R_RESOURCE_ROOT ?? resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const guidanceRoots = Promise.all([
+    realpath(resolve(resourceRoot, "skills/pi-r/SKILL.md")).catch(() => undefined),
+    realpath(resolve(resourceRoot, "skills/pi-r/references")).catch(() => undefined),
+  ]).then((roots) => roots.filter((root): root is string => root !== undefined));
 
   const configuredLauncherTools = process.env.PI_R_INITIAL_TOOLS?.split(",").filter(Boolean);
   if (configuredLauncherTools?.some((name) => !/^[a-z][a-z0-9_]*$/.test(name))) {
@@ -664,10 +683,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
           if (unknown.length) throw new RecoverableError("UNKNOWN_TARGET", `Targets are not declared in the locked contract: ${unknown.join(", ")}`, { targets: unknown });
           const writableFiles: string[] = [];
           for (const target of contract.targets.filter((candidate) => names.includes(candidate.name) && candidate.artifact === "file")) {
-            for (const [parameter, reference] of Object.entries(target.arguments)) {
-              if (!("constant" in reference) || !/(?:^|_)(?:output|file)?path$/i.test(parameter)) continue;
-              const value = contract.constants[reference.constant];
-              if (typeof value !== "string" || isAbsolute(value)) {
+            for (const value of fileTargetOutputs(target, contract.constants)) {
+              if (isAbsolute(value)) {
                 throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} requires a relative declared output path`);
               }
               const requestedOutput = resolve(state.projectRoot, value);
@@ -885,13 +902,16 @@ export default function piRExtension(pi: ExtensionAPI): void {
       label: "Propose R project contract",
       description: "Validate and replace the single ignored pi-r Project Contract draft. Does not write project source.",
       promptSnippet: "Create or revise the schema-validated draft Project Contract during Design Mode",
-      parameters: contractSchema,
+      parameters: CONTRACT_PROPOSAL_SCHEMA,
       async execute(_toolCallId, params) {
         const operation = proposalQueue.then(async () => {
           if (!state || state.phase !== "design") throw new Error("Contract proposals require active Design Mode");
           let contract: ProjectContract;
           try {
-            contract = validateContract(params);
+            const pinPath = process.env.PI_R_NIXPKGS_PIN_PATH;
+            if (!pinPath) throw new Error("PI_R_NIXPKGS_PIN_PATH is required");
+            const pin = JSON.parse(await readFile(pinPath, "utf8")) as NixpkgsPin;
+            contract = normalizeContractProposal(params, pin);
           } catch (error) {
             throw new Error(`Contract proposal rejected: ${error instanceof Error ? error.message : String(error)}`);
           }
@@ -1465,7 +1485,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const rawPath = typeof event.input?.path === "string" ? event.input.path.replace(/^@/, "") : context.cwd;
     const requested = isAbsolute(rawPath) ? rawPath : resolve(context.cwd, rawPath);
     const canonical = await realpath(requested).catch(() => undefined);
-    const roots = [state.projectRoot, ...state.readOnlyRoots];
+    const roots = [state.projectRoot, ...state.readOnlyRoots, ...await guidanceRoots];
     const permitted =
       canonical !== undefined &&
       roots.some((root) => canonical === root || (!relative(root, canonical).startsWith(`..${sep}`) && relative(root, canonical) !== ".." && !isAbsolute(relative(root, canonical))));
