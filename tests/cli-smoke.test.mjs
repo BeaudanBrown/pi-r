@@ -38,7 +38,7 @@ test("paths can be resolved from an explicit resource root", async () => {
   await writeFile(join(root, "skills", "pi-r", "references", "workbench.md"), "# Test\n");
 
   const { stdout } = await execFileAsync(cli, ["paths", "--json"], {
-    env: { ...process.env, PI_R_RESOURCE_ROOT: root },
+    env: { ...process.env, PI_R_TEST_RESOURCE_ROOT: root },
   });
   const paths = JSON.parse(stdout);
 

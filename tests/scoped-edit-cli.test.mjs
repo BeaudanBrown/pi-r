@@ -165,6 +165,17 @@ test("invalid candidates return structured errors and never mutate source", asyn
   assert.equal(await readFile(path, "utf8"), original);
 });
 
+test("the packaged CLI ignores inherited internal Tree-sitter overrides", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-r-stale-tree-sitter-"));
+  const stale = join(directory, "tree-sitter");
+  await writeFile(stale, "#!/bin/sh\necho stale runtime >&2\nexit 2\n");
+  await chmod(stale, 0o755);
+
+  const result = await run(["r-functions", "inspect", fixture], { PI_R_TREE_SITTER: stale });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).ok, true);
+});
+
 test("Tree-sitter CLI incompatibility is non-retryable and not reported as R syntax", async () => {
   const path = await tempCopy();
   const request = await requestFile({
@@ -177,7 +188,7 @@ test("Tree-sitter CLI incompatibility is non-retryable and not reported as R syn
   await writeFile(incompatible, "#!/bin/sh\necho \"error: unexpected argument '--lib-path' found\" >&2\nexit 2\n");
   await chmod(incompatible, 0o755);
 
-  const result = await run(["r-functions", "edit", request], { PI_R_TREE_SITTER: incompatible });
+  const result = await run(["r-functions", "edit", request], { PI_R_TEST_TREE_SITTER: incompatible });
   assert.equal(result.code, 1);
   assert.deepEqual(JSON.parse(result.stdout).error, {
     code: "RUNTIME_INCOMPATIBLE",
@@ -207,7 +218,7 @@ test("a fresh base-R parse is required after Tree-sitter validation", async () =
   await chmod(failingR, 0o755);
 
   const result = await run(["r-functions", "edit", request], {
-    PI_R_BASE_RSCRIPT: failingR,
+    PI_R_TEST_BASE_RSCRIPT: failingR,
   });
   assert.equal(result.code, 1);
   assert.deepEqual(JSON.parse(result.stdout).error, {

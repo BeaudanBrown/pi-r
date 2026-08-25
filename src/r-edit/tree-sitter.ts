@@ -22,9 +22,9 @@ interface TreeSitterTools {
 
 function tools(environment = process.env): TreeSitterTools {
   return {
-    executable: environment.PI_R_TREE_SITTER ?? "tree-sitter",
-    grammar: environment.PI_R_TREE_SITTER_R ?? "",
-    query: environment.PI_R_TREE_SITTER_QUERY ?? "",
+    executable: environment.PI_R_TEST_TREE_SITTER ?? environment.PI_R_TREE_SITTER ?? "tree-sitter",
+    grammar: environment.PI_R_TEST_TREE_SITTER_R ?? environment.PI_R_TREE_SITTER_R ?? "",
+    query: environment.PI_R_TEST_TREE_SITTER_QUERY ?? environment.PI_R_TREE_SITTER_QUERY ?? "",
   };
 }
 

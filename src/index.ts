@@ -26,7 +26,7 @@ export interface ResourcePaths {
 
 export function resourcePaths(environment = process.env): ResourcePaths {
   const installedRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const resources = environment.PI_R_RESOURCE_ROOT ?? join(installedRoot, "share", "pi-r");
+  const resources = environment.PI_R_TEST_RESOURCE_ROOT ?? environment.PI_R_RESOURCE_ROOT ?? join(installedRoot, "share", "pi-r");
   return {
     resources,
     extension: join(resources, "extensions", "pi-r.ts"),

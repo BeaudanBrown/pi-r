@@ -83,22 +83,22 @@
               makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/pi-r \
                 --add-flags "$out/lib/pi-r/cli.mjs" \
                 --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bubblewrap pkgs.tree-sitter rRuntime ]}" \
-                --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
-                --set-default PI_R_NIXPKGS_PIN_PATH "${piResources}/share/pi-r/resources/nixpkgs-pin.json" \
-                --set-default PI_R_SANDBOX_PATH "${sandboxRuntimePath}" \
-                --set-default PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
-                --set-default PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
-                --set-default PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
-                --set-default PI_R_RSCRIPT "${rRuntime}/bin/Rscript" \
-                --set-default PI_R_BASE_RSCRIPT "${rRuntime}/bin/Rscript" \
-                --set-default PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R" \
-                --set-default PI_R_CONTRACT_READER "${piResources}/share/pi-r/R/read_contract.R" \
-                --set-default PI_R_BWRAP "${pkgs.bubblewrap}/bin/bwrap" \
-                --set-default PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
-                --set-default PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
-                --set-default PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
-                --set-default PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R" \
-                --set-default PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R"
+                --set PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
+                --set PI_R_NIXPKGS_PIN_PATH "${piResources}/share/pi-r/resources/nixpkgs-pin.json" \
+                --set PI_R_SANDBOX_PATH "${sandboxRuntimePath}" \
+                --set PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
+                --set PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
+                --set PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
+                --set PI_R_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set PI_R_BASE_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set PI_R_FORMATTER_SCRIPT "${piResources}/share/pi-r/R/style_body.R" \
+                --set PI_R_CONTRACT_READER "${piResources}/share/pi-r/R/read_contract.R" \
+                --set PI_R_BWRAP "${pkgs.bubblewrap}/bin/bwrap" \
+                --set PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
+                --set PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
+                --set PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
+                --set PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R" \
+                --set PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R"
               runHook postInstall
             '';
 

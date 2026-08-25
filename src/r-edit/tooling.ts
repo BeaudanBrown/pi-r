@@ -52,7 +52,7 @@ export async function formatRBody(body: string): Promise<string> {
 export async function assertBaseRParse(paths: readonly string[]): Promise<void> {
   try {
     await execFileAsync(
-      process.env.PI_R_BASE_RSCRIPT ?? process.env.PI_R_RSCRIPT ?? "Rscript",
+      process.env.PI_R_TEST_BASE_RSCRIPT ?? process.env.PI_R_BASE_RSCRIPT ?? process.env.PI_R_RSCRIPT ?? "Rscript",
       [
         "--vanilla",
         "-e",
