@@ -12,12 +12,14 @@ export type { StructuredError } from "./r-edit/errors.js";
 export { inspectRFile } from "./r-edit/tree-sitter.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
-export const VERSION = "0.13.0";
+export const VERSION = "0.14.0";
 
 export interface ResourcePaths {
   resources: string;
   extension: string;
   scoutExtension: string;
+  skill: string;
+  reference: string;
   rHelper: string;
   technologyPolicy: string;
 }
@@ -29,6 +31,8 @@ export function resourcePaths(environment = process.env): ResourcePaths {
     resources,
     extension: join(resources, "extensions", "pi-r.ts"),
     scoutExtension: join(resources, "extensions", "pi-r-dependency-scout.ts"),
+    skill: join(resources, "skills", "pi-r", "SKILL.md"),
+    reference: join(resources, "skills", "pi-r", "references", "workbench.md"),
     rHelper: join(resources, "R", "pi_r_runtime.R"),
     technologyPolicy: join(resources, "resources", "technology-policy-v1.json"),
   };

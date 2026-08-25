@@ -249,9 +249,9 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
 function restoreState(entries: unknown[]): WorkbenchState | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index] as { type?: string; customType?: string; data?: unknown };
-    if (entry?.type === "custom" && entry.customType === STATE_ENTRY && isWorkbenchState(entry.data)) {
-      return entry.data;
-    }
+    if (entry?.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
+    if ((entry.data as { inactive?: unknown } | undefined)?.inactive === true) return undefined;
+    if (isWorkbenchState(entry.data)) return entry.data;
   }
   return undefined;
 }
@@ -340,6 +340,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let scoutRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
+
+  const configuredLauncherTools = process.env.PI_R_INITIAL_TOOLS?.split(",").filter(Boolean);
+  if (configuredLauncherTools?.some((name) => !/^[a-z][a-z0-9_]*$/.test(name))) {
+    throw new Error("PI_R_INITIAL_TOOLS contains an invalid tool name");
+  }
   let proposalQueue: Promise<void> = Promise.resolve();
   let editQueue: Promise<void> = Promise.resolve();
   let workerQueue: Promise<void> = Promise.resolve();
@@ -1100,6 +1105,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     worker = undefined;
     projectRscript = undefined;
     updateLiveWorker([], false, "workbench-started");
+    previousActiveTools ??= pi.getActiveTools();
     registerProposalTool();
     registerWorkerTools();
     const next: WorkbenchState = {
@@ -1405,8 +1411,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, context) => {
+    if (configuredLauncherTools?.length) pi.setActiveTools([...new Set(configuredLauncherTools)]);
     const restored = restoreState(context.sessionManager.getBranch());
     if (!restored) return;
+    previousActiveTools ??= pi.getActiveTools();
     try {
       const mismatch = await verifyState(restored, context);
       if (mismatch) {
@@ -1518,6 +1526,29 @@ export default function piRExtension(pi: ExtensionAPI): void {
         context.ui.notify(`${hud(state)}\n${await workerStatusText()}`, "info");
         return;
       }
+      if (subcommand === "stop") {
+        if (!state) {
+          context.ui.notify("pi-r workbench is not active", "info");
+          return;
+        }
+        const mismatch = await verifyState(state, context);
+        if (mismatch) {
+          quarantine(context, `pi-r cannot deactivate safely: ${mismatch}`);
+          return;
+        }
+        worker?.stop(true);
+        worker = undefined;
+        projectRscript = undefined;
+        state = undefined;
+        updateLiveWorker([], false, "inactive");
+        pi.appendEntry(STATE_ENTRY, { inactive: true });
+        if (previousActiveTools) pi.setActiveTools(previousActiveTools);
+        previousActiveTools = undefined;
+        context.ui.setWidget?.("pi-r-hud", undefined);
+        context.ui.setStatus?.("pi-r", undefined);
+        context.ui.notify("pi-r workbench deactivated; launcher tools restored", "info");
+        return;
+      }
       if (subcommand === "publish") {
         const operation = publishQueue.then(() => publishDeliverables(context));
         publishQueue = operation.then(() => undefined, () => undefined);
@@ -1589,7 +1620,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return;
       }
       if (subcommand !== "start") {
-        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock | /r environment | /r publish", "warning");
+        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r stop | /r lock | /r environment | /r publish", "warning");
         return;
       }
       try {

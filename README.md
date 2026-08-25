@@ -28,11 +28,14 @@ Inspect the exported Pi resource paths:
 nix eval --json .#packages.$(nix eval --raw --impure --expr builtins.currentSystem).pi-r.resourcePaths
 ```
 
+The stable interface includes the CLI/R runtime, main and scout extensions, formatter, Tree-sitter parser/grammar/query, Bubblewrap sandbox, compact skill/reference, and worker/target helper paths. See [Pi launcher integration](docs/harness-integration.md) for normal pi-harness and lean local-model wiring.
+
 The extension resource can be tried with Pi using the `extension` path reported above. It exposes only `/r` while inactive. In a Git repository with a commit, start or inspect a constrained design session with:
 
 ```console
 /r start [read-only-root ...]
 /r status
+/r stop
 ```
 
 Start stashes tracked changes, creates or resumes `pi-r/workbench`, and switches the model to project-scoped read/search tools plus the typed contract proposal tool. Optional roots are canonicalized and added as read-only attachments. Phase state is persisted in the Pi session; resume fails closed if the working directory, repository, branch, or HEAD changed. See [Git-backed Workbench Sessions](docs/workbench-session.md) for the lifecycle and security boundary.

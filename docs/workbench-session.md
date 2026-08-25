@@ -5,6 +5,7 @@ The Pi extension exposes one command surface while inactive:
 ```console
 /r start [read-only-root ...]
 /r status
+/r stop
 ```
 
 ## Start and resume
@@ -13,7 +14,7 @@ The Pi extension exposes one command surface while inactive:
 
 Each successful start appends a `pi-r-workbench-state` custom entry to the Pi session. This entry is TUI/session state and does not enter model context. It records the canonical working directory and project root, branch and full HEAD, phase, attached Read-Only Roots, policy/contract state, and bounded HUD fields.
 
-On Pi session resume, the extension verifies the canonical working directory, repository root, branch, and HEAD before restoring the persisted constrained phase. Transient R state is never resumed. A mismatch fails closed with no active model tools. `/r status` repeats this verification.
+On Pi session resume, the extension verifies the canonical working directory, repository root, branch, and HEAD before restoring the persisted constrained phase. Transient R state is never resumed. A mismatch fails closed with no active model tools. `/r status` repeats this verification. User-only `/r stop` stops Transient State, records an inactive marker so later session loads do not resume the workbench, clears the HUD, and restores the exact tool surface captured from the normal or lean launcher.
 
 ## Design Mode boundary
 

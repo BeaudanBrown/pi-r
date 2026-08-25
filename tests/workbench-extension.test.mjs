@@ -224,8 +224,15 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.match(ctx.widgets.at(-1)[1][0], /phase=design .*branch=pi-r\/workbench@[0-9a-f]{7,}/);
   assert.match(ctx.widgets.at(-1)[1][0], /contract=missing policy=pi-r-policy-v1 scopes=0 approval=none worker=stopped/);
 
-  await h.handlers.get("session_shutdown")({ reason: "new" }, ctx);
+  await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
+  assert.deepEqual(h.appended.at(-1).data, { inactive: true });
+  assert.match(ctx.notifications.at(-1)[0], /deactivated.*restored/i);
+
+  const resumed = harness();
+  const resumedContext = context(root, h.appended);
+  await resumed.handlers.get("session_start")({}, resumedContext);
+  assert.equal(resumed.activeToolChanges.length, 0, "an explicit stop marker must prevent later session resume");
 });
 
 test("/r start rejects a Git repository without HEAD and stays inactive", async () => {

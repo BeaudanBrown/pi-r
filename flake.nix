@@ -12,10 +12,10 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.13.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.14.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
-            mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
+            mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources $out/share/pi-r/skills/pi-r/references $out/share/pi-r/docs
             esbuild ${self}/extensions/pi-r.ts \
               --bundle \
               --platform=node \
@@ -35,6 +35,9 @@
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
             cp ${./resources/technology-policy-v1.json} $out/share/pi-r/resources/technology-policy-v1.json
+            cp ${./skills/pi-r/SKILL.md} $out/share/pi-r/skills/pi-r/SKILL.md
+            cp ${./skills/pi-r/references/workbench.md} $out/share/pi-r/skills/pi-r/references/workbench.md
+            cp ${self}/docs/*.md $out/share/pi-r/docs/
           '';
 
           rRuntime = pkgs.rWrapper.override {
@@ -43,7 +46,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.13.0";
+            version = "0.14.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -82,11 +85,34 @@
               runHook postInstall
             '';
 
-            passthru.resourcePaths = {
-              resources = "${piResources}/share/pi-r";
-              extension = "${piResources}/share/pi-r/extensions/pi-r.ts";
-              scoutExtension = "${piResources}/share/pi-r/extensions/pi-r-dependency-scout.ts";
-              rHelper = "${piResources}/share/pi-r/R/pi_r_runtime.R";
+            passthru = {
+              resourcePaths = {
+                root = "${piResources}/share/pi-r";
+                extension = "${piResources}/share/pi-r/extensions/pi-r.ts";
+                scoutExtension = "${piResources}/share/pi-r/extensions/pi-r-dependency-scout.ts";
+                skill = "${piResources}/share/pi-r/skills/pi-r/SKILL.md";
+                reference = "${piResources}/share/pi-r/skills/pi-r/references/workbench.md";
+                docs = "${piResources}/share/pi-r/docs";
+                cli = "${piR}/bin/pi-r";
+                nixpkgs = "${pkgs.path}";
+                rscript = "${rRuntime}/bin/Rscript";
+                formatter = "${piResources}/share/pi-r/R/style_body.R";
+                parser = "${pkgs.tree-sitter}/bin/tree-sitter";
+                parserGrammar = "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser";
+                parserQuery = "${piResources}/share/pi-r/resources/r-functions.scm";
+                sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+                worker = "${piResources}/share/pi-r/R/worker.R";
+                targetRunner = "${piResources}/share/pi-r/R/target_runner.R";
+                artifactInspector = "${piResources}/share/pi-r/R/artifact_inspector.R";
+                contractReader = "${piResources}/share/pi-r/R/read_contract.R";
+                technologyPolicy = "${piResources}/share/pi-r/resources/technology-policy-v1.json";
+              };
+              piResources = {
+                extensions = [ "${piResources}/share/pi-r/extensions/pi-r.ts" ];
+                skills = [ "${piResources}/share/pi-r/skills/pi-r" ];
+                references = [ "${piResources}/share/pi-r/skills/pi-r/references/workbench.md" ];
+                runtimePackages = [ piR ];
+              };
             };
 
             meta = {
@@ -111,11 +137,29 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.13.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.14.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME" "$TMPDIR/extension"
+
+            test -x ${piR.resourcePaths.cli}
+            test -x ${piR.resourcePaths.rscript}
+            test -x ${piR.resourcePaths.parser}
+            test -x ${piR.resourcePaths.sandbox}
+            test -f ${piR.resourcePaths.extension}
+            test -f ${piR.resourcePaths.scoutExtension}
+            test -f ${piR.resourcePaths.skill}
+            test -f ${piR.resourcePaths.reference}
+            test -f ${piR.resourcePaths.formatter}
+            test -x ${piR.resourcePaths.parserGrammar}
+            test -f ${piR.resourcePaths.parserQuery}
+            test -f ${piR.resourcePaths.worker}
+            test -f ${piR.resourcePaths.targetRunner}
+            test -f ${piR.resourcePaths.artifactInspector}
+            test -f ${piR.resourcePaths.contractReader}
+            test -f ${piR.resourcePaths.technologyPolicy}
+            grep -Fx 'name: pi-r' ${piR.resourcePaths.skill} >/dev/null
 
             legacy_format="$(printf 'r\144s')"
             checked_sources="${self}/R ${self}/src ${self}/tests ${self}/docs ${self}/extensions ${self}/resources ${self}/README.md"
