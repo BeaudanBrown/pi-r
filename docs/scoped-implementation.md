@@ -3,7 +3,7 @@
 After `/r lock`, Implementation Mode replaces the contract proposal capability with two narrow tools:
 
 - `r_function_inspect` accepts an Approved Function name and returns its locked signature, complete source, and a SHA-256 source digest.
-- `r_function_edit` accepts that function name and digest plus only the R statements from inside the function body. Do not include `function(...)` or outer braces. For example: `{ "function": "load_shhs1", "expectedSourceHash": "sha256:...", "statements": "fread(shhs1_status_file)" }`.
+- `r_function_edit` accepts that function name and digest plus only the R statements from inside the function body. Do not repeat the outer Approved Function declaration or include outer braces; local named helpers and anonymous functions remain valid statements. For example: `{ "function": "load_shhs1", "expectedSourceHash": "sha256:...", "statements": "fread(shhs1_status_file)" }`.
 
 Neither tool accepts a path. The implementation path is derived from the locked Project Contract as `R/<function>.R`; functions absent from that contract are outside the capability. Built-in shell, edit, and write tools remain disabled.
 

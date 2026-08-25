@@ -1136,7 +1136,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
         agentAction: "Provide only statements from inside the Approved Function body",
       });
     }
-    if (/^(?:[A-Za-z.][A-Za-z0-9._]*\s*<-\s*)?function\s*\(/s.test(statements) || statements.startsWith("{")) {
+    const selectedName = typeof input.function === "string"
+      ? input.function.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      : "";
+    const repeatsOuterDeclaration = selectedName
+      ? new RegExp(`^${selectedName}\\s*<-\\s*function\\s*\\(`).test(statements)
+      : false;
+    if (repeatsOuterDeclaration || statements.startsWith("{")) {
       throw new RecoverableError(
         "INVALID_EDIT_SHAPE",
         "statements must omit the function declaration and outer braces",
@@ -1251,8 +1257,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: EDIT_TOOL,
       label: "Edit Approved R function body",
-      description: "Replace one Approved Function body. Pass only its inner R statements: no function declaration and no outer braces. pi-r wraps, formats, validates, and commits them. Governed package functions are called without :: namespace operators.",
-      promptSnippet: "Inspect immediately before editing, then pass only inner body statements with the current sha256 digest; do not include function(...) or braces and do not use ::",
+      description: "Replace one Approved Function body. Pass only its inner R statements: no repeated outer Approved Function declaration and no outer braces. pi-r wraps, formats, validates, and commits them. Governed package functions are called without :: namespace operators.",
+      promptSnippet: "Inspect immediately before editing, then pass only inner body statements with the current sha256 digest; do not repeat the outer Approved Function declaration or braces and do not use ::",
       parameters: EDIT_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = editQueue.then(() => applyScopedEdit(params, context));

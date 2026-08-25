@@ -774,14 +774,14 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
     edit.execute("invalid-shape", {
       function: "load_input",
       expectedSourceHash: inspected.details.sourceHash,
-      statements: "function(path) { path }",
+      statements: "load_input <- function(path) { path }",
     }, undefined, undefined, ctx),
     /INVALID_EDIT_SHAPE.*omit the function declaration and outer braces/,
   );
   await edit.execute("edit", {
     function: "load_input",
     expectedSourceHash: inspected.details.sourceHash,
-    statements: "path",
+    statements: "identity_local <- function(value) value\nidentity_local(path)",
   }, undefined, undefined, ctx);
   const implemented = await readFile(join(root, "R/load_input.R"), "utf8");
 
