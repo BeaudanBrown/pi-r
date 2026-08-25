@@ -315,6 +315,11 @@ function showStartProgress(context: CommandContext, step: string): void {
   context.ui.setStatus?.("pi-r", `R:starting · ${step}`);
 }
 
+function showLockProgress(context: CommandContext, step: string): void {
+  context.ui.setWidget?.("pi-r-hud", [`pi-r LOCKING — ${step}`]);
+  context.ui.setStatus?.("pi-r", `R:locking · ${step}`);
+}
+
 function resultMessage(result: ExecResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 }
@@ -1783,6 +1788,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   async function lock(context: CommandContext): Promise<void> {
+    const startedAt = Date.now();
+    showLockProgress(context, "checking session and Git state");
     if (!state || (state.phase !== "design" && state.phase !== "revision")) {
       throw new Error("Contract lock requires active Design or Contract Revision Mode");
     }
@@ -1794,6 +1801,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const draftText = await readFile(draftPath, "utf8").catch(() => {
       throw new Error("No valid contract draft exists; use r_contract_propose first");
     });
+    showLockProgress(context, "validating Project Contract");
     const contract = validateContract(JSON.parse(draftText));
     for (const dependency of contract.dependencies) {
       const decision = declaredPackagePolicy(dependency);
@@ -1807,7 +1815,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
         throw new RecoverableError("UNREGISTERED_PACKAGE", `Initial dependency requires an explicit governed approval: ${dependency}`);
       }
     }
+    showLockProgress(context, "checking source-file authority");
     await validateSourceFileAuthority(contract, state.projectRoot, state.readOnlyRoots);
+    showLockProgress(context, "rendering candidate scaffold");
     const files = new Map(renderScaffold(contract));
     const removedPaths: string[] = [];
     if (state.phase === "revision") {
@@ -1827,8 +1837,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
       state.projectRoot,
       contract,
       (command, args, options) => pi.exec(command, args, options),
+      (phase) => showLockProgress(context, phase),
     );
+    showLockProgress(context, "checking sandboxed project worker");
     await preflightWorker(state.projectRoot, state.readOnlyRoots, "project", validatedEnvironment.runtime);
+    showLockProgress(context, "preparing approval diff");
     const diff = await sourceDiff(state.projectRoot, files, removedPaths);
     state = { ...state, pendingApproval: "contract-lock" };
     showHud(context, state);
@@ -1838,7 +1851,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (!approved) {
       state = { ...state, pendingApproval: "none" };
       showHud(context, state);
-      context.ui.notify("Project Contract lock cancelled; validated draft preserved", "info");
+      context.ui.notify(`Project Contract lock cancelled after ${((Date.now() - startedAt) / 1000).toFixed(1)}s; validated draft preserved`, "info");
       return;
     }
     const implementation = await writeScaffoldCommit(contract, files, validatedEnvironment.runtime, removedPaths);
@@ -1851,7 +1864,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     updateLiveWorker([], liveTransientStateLost, "contract-locked");
     pi.appendEntry(STATE_ENTRY, implementation);
     showHud(context, implementation);
-    context.ui.notify(`Project Contract locked: ${hud(implementation)}`, "info");
+    context.ui.notify(`Project Contract locked in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: ${hud(implementation)}`, "info");
   }
 
   pi.on("session_start", async (_event, context) => {
@@ -2102,10 +2115,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
         try {
           await lock(context);
         } catch (error) {
-          if (state?.pendingApproval === "contract-lock") {
-            state = { ...state, pendingApproval: "none" };
-            showHud(context, state);
-          }
+          if (state?.pendingApproval === "contract-lock") state = { ...state, pendingApproval: "none" };
+          if (state) showHud(context, state);
           context.ui.notify(`pi-r lock failed: ${actionableToolError(error).message}`, "error");
         }
         return;

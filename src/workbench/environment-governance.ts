@@ -108,6 +108,7 @@ async function validateCandidateEnvironment(
     "packages <- args[-1L]",
     "missing <- packages[!vapply(packages, requireNamespace, logical(1L), quietly = TRUE)]",
     "if (length(missing)) stop(sprintf('packages failed to load: %s', paste(missing, collapse = ', ')), call. = FALSE)",
+    "cat(sprintf('PI_R_RUNTIME:%s\\n', unname(Sys.which('Rscript'))))",
   ].join("; ");
   const explicitRuntime = process.env.PI_R_PROJECT_RSCRIPT;
   const validation = explicitRuntime
@@ -127,15 +128,11 @@ async function validateCandidateEnvironment(
     });
   }
   if (explicitRuntime) return explicitRuntime;
-  const runtime = await runner(nix, [
-    "--extra-experimental-features", "nix-command flakes",
-    "develop", ...localNixpkgsOverride(), `path:${staging}`,
-    "--command", "which", "Rscript",
-  ], { cwd: staging, timeout: 120_000 });
-  const path = runtime.stdout.trim();
-  if (runtime.code !== 0 || !path.startsWith("/")) {
-    throw new RecoverableError("ENVIRONMENT_VALIDATION_FAILED", "Candidate environment did not expose an absolute Rscript runtime", {
-      message: (runtime.stderr || runtime.stdout).slice(0, 2000),
+  const runtimeMatch = validation.stdout.match(/^PI_R_RUNTIME:(\/.+)$/m);
+  const path = runtimeMatch?.[1]?.trim();
+  if (!path?.startsWith("/")) {
+    throw new RecoverableError("ENVIRONMENT_VALIDATION_FAILED", "Candidate environment did not report an absolute Rscript runtime", {
+      message: (validation.stderr || validation.stdout).slice(0, 2000),
     });
   }
   return path;
@@ -145,11 +142,15 @@ export async function validateContractEnvironment(
   projectRoot: string,
   contract: ProjectContract,
   runner: CommandRunner,
+  onProgress?: (phase: string) => void,
 ): Promise<{ runtime: string; resolvedPackages: ResolvedPackage[]; files: Record<string, string> }> {
+  onProgress?.("staging candidate environment");
   const files = generatedEnvironmentFiles(contract);
   const staging = await stageFiles(resolve(projectRoot), files);
   const packageNames = [...new Set([...INTERNAL_PACKAGES, ...contract.dependencies])].sort();
+  onProgress?.(`resolving ${packageNames.length} R packages`);
   const resolution = await resolvePackages(staging, packageNames, runner);
+  onProgress?.("realising environment and loading package namespaces");
   const runtime = await validateCandidateEnvironment(staging, packageNames, runner);
   return { runtime, resolvedPackages: resolution.packages, files };
 }

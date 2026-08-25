@@ -10,7 +10,9 @@ The draft is excluded through the repository's local Git exclude file, so propos
 /r lock
 ```
 
-Before asking for confirmation, lock revalidates the Workbench Session and draft and rejects tracked source changes. The confirmation contains:
+Lock immediately displays `R:locking` progress while it revalidates the Workbench Session and draft, checks source authority, resolves packages, realises the exact Nix/R environment, loads namespaces, probes the sandboxed worker, and prepares the approval diff. Completion or cancellation reports elapsed time. The environment validation process reports its own immutable `Rscript` path, avoiding a second `nix develop` used only for runtime discovery.
+
+Before asking for confirmation, lock rejects tracked source changes. The confirmation contains:
 
 - Approved Function names and required parameters;
 - canonical constants;

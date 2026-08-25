@@ -746,6 +746,12 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
   await h.tools.find((tool) => tool.name === "r_contract_propose")
     .execute("initial", proposalForContract(original), undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
+  const lockProgress = ctx.statuses.map(([, value]) => value).filter((value) => /R:locking/.test(value));
+  assert.ok(lockProgress.some((value) => /validating Project Contract/.test(value)));
+  assert.ok(lockProgress.some((value) => /resolving \d+ R packages/.test(value)));
+  assert.ok(lockProgress.some((value) => /loading package namespaces/.test(value)));
+  assert.ok(lockProgress.some((value) => /checking sandboxed project worker/.test(value)));
+  assert.match(ctx.notifications.at(-1)[0], /Project Contract locked in \d+\.\d+s/);
 
   const inspect = h.tools.find((tool) => tool.name === "r_function_inspect");
   const edit = h.tools.find((tool) => tool.name === "r_function_edit");

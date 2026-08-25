@@ -10,6 +10,7 @@ export { createEditCandidate } from "./r-edit/scoped-edit.js";
 export { errorEnvelope, RecoverableError } from "./r-edit/errors.js";
 export type { StructuredError } from "./r-edit/errors.js";
 export { inspectRFile } from "./r-edit/tree-sitter.js";
+export { validateContractEnvironment } from "./workbench/environment-governance.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
 export const VERSION = "0.17.0";
