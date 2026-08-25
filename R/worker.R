@@ -194,6 +194,6 @@ repeat {
   } else {
     list(id = request$id, error = list(code = "INVALID_WORKER_REQUEST", message = "Unknown worker operation", recoverable = TRUE))
   }
-  cat(toJSON(response, auto_unbox = TRUE, null = "null", na = "string", digits = NA), "\n", sep = "")
+  cat("PI_R_RESPONSE:", toJSON(response, auto_unbox = TRUE, null = "null", na = "string", digits = NA), "\n", sep = "")
   flush(stdout())
 }

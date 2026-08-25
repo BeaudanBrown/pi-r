@@ -11,8 +11,8 @@ Pi-r is implemented in this repository and distributed as immutable resources. P
 - `cli` and the pinned `rscript` runtime;
 - `formatter`;
 - `parser`, `parserGrammar`, and `parserQuery`;
-- `sandbox`;
-- `worker`, `targetRunner`, `artifactInspector`, and `contractReader`;
+- `sandbox` and `sandboxRuntimePath`, the immutable minimal helper `PATH`;
+- `worker`, `targetRunner`, `artifactInspector`, `dataInspector`, and `contractReader`;
 - `technologyPolicy`; and
 - the exact `nixpkgs` source used for deterministic dependency resolution;
 - an immutable JSON description of that source's owner, repository, revision, NAR hash, and timestamp, used to normalize model-facing Contract Drafts locally.

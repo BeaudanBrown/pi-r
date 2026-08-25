@@ -1,6 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
+import { sandboxRuntimePath } from "./sandbox.js";
 
 export type WorkerEnvironment = "design" | "project";
 export type WorkerState = "stopped" | "running" | "crashed";
@@ -52,11 +56,24 @@ export interface SandboxedRWorkerOptions {
   readOnlyRoots: string[];
   workerScript: string;
   bwrap?: string;
+  sandboxPath?: string;
   requestTimeoutMs?: number;
+  logDirectory?: string;
   onState?(state: WorkerState): void;
 }
 
 const MAX_PROTOCOL_LINE = 1024 * 1024;
+const RESPONSE_PREFIX = "PI_R_RESPONSE:";
+const MAX_DIAGNOSTIC_TAIL = 2048;
+
+export interface WorkerCrashDiagnostics {
+  code: string;
+  message: string;
+  environment?: WorkerEnvironment;
+  logPath?: string;
+  stderrTail: string;
+  unexpectedStdoutTail: string;
+}
 
 function directoryArguments(path: string): string[] {
   const absolute = resolve(path);
@@ -101,6 +118,11 @@ export class SandboxedRWorker {
   #pending = new Map<number, PendingRequest>();
   #state: WorkerState = "stopped";
   #transientStateLost = false;
+  #stderrTail = "";
+  #unexpectedStdoutTail = "";
+  #logPath: string | undefined;
+  #log: WriteStream | undefined;
+  #lastCrash: WorkerCrashDiagnostics | undefined;
 
   constructor(options: SandboxedRWorkerOptions) {
     this.#options = options;
@@ -169,12 +191,32 @@ export class SandboxedRWorker {
     return objects(response.objects);
   }
 
-  async status(): Promise<{ state: WorkerState; environment?: WorkerEnvironment; objects: WorkerObject[]; transientStateLost: boolean }> {
+  async status(): Promise<{ state: WorkerState; environment?: WorkerEnvironment; objects: WorkerObject[]; transientStateLost: boolean; lastCrash?: WorkerCrashDiagnostics; logPath?: string }> {
     if (!this.#child || this.#state !== "running") {
-      return { state: this.#state, environment: this.#environment, objects: [], transientStateLost: this.#transientStateLost };
+      return {
+        state: this.#state,
+        environment: this.#environment,
+        objects: [],
+        transientStateLost: this.#transientStateLost,
+        ...(this.#lastCrash ? { lastCrash: this.#lastCrash } : {}),
+        ...(this.#logPath ? { logPath: this.#logPath } : {}),
+      };
     }
     const response = await this.#request({ operation: "status" });
-    return { state: this.#state, environment: this.#environment, objects: objects(response.objects), transientStateLost: this.#transientStateLost };
+    return {
+      state: this.#state,
+      environment: this.#environment,
+      objects: objects(response.objects),
+      transientStateLost: this.#transientStateLost,
+      ...(this.#logPath ? { logPath: this.#logPath } : {}),
+    };
+  }
+
+  async healthCheck(environment: WorkerEnvironment, rscript: string): Promise<{ healthy: true; logPath?: string }> {
+    await this.#ensureStarted(environment, rscript);
+    await this.#request({ operation: "status" });
+    this.#lastCrash = undefined;
+    return { healthy: true, ...(this.#logPath ? { logPath: this.#logPath } : {}) };
   }
 
   async reset(reason = "reset requested"): Promise<{ lostObjects: number; reason: string }> {
@@ -193,6 +235,8 @@ export class SandboxedRWorker {
     this.#child = undefined;
     this.#environment = undefined;
     this.#buffer = "";
+    this.#log?.end();
+    this.#log = undefined;
     if (markLost) this.#transientStateLost = true;
     this.#setState("stopped");
     this.#rejectPending(new RecoverableError("WORKER_STOPPED", "R worker stopped and transient state was lost"));
@@ -204,6 +248,15 @@ export class SandboxedRWorker {
     if (!isAbsolute(rscript) || !isAbsolute(this.#options.workerScript)) {
       throw new RecoverableError("WORKER_START_FAILED", "R worker runtime paths must be absolute");
     }
+    const logDirectory = this.#options.logDirectory ?? resolve(this.#options.projectRoot, ".pi/tmp/pi-r-worker");
+    await mkdir(logDirectory, { recursive: true });
+    this.#log?.end();
+    this.#stderrTail = "";
+    this.#unexpectedStdoutTail = "";
+    this.#logPath = resolve(logDirectory, `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.log`);
+    this.#log = createWriteStream(this.#logPath, { flags: "wx", mode: 0o600 });
+    this.#log.write(`pi-r worker\nenvironment=${environment}\nruntime=${rscript}\n`);
+    const runtimePath = sandboxRuntimePath(this.#options.sandboxPath);
     const args = [
       "--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
       "--ro-bind", "/nix/store", "/nix/store",
@@ -216,28 +269,34 @@ export class SandboxedRWorker {
     for (const root of this.#options.readOnlyRoots) {
       args.push(...directoryArguments(root), "--ro-bind", root, root);
     }
+    if (process.env.PI_R_REAL_WORKER_SCRIPT) {
+      args.push("--setenv", "PI_R_REAL_WORKER_SCRIPT", process.env.PI_R_REAL_WORKER_SCRIPT);
+    }
     args.push(
       "--setenv", "HOME", "/tmp/pi-r-home",
       "--setenv", "TMPDIR", "/tmp",
       "--setenv", "LC_ALL", "C",
+      "--setenv", "PATH", runtimePath,
       "--setenv", "PI_R_WORKER_ENVIRONMENT", environment,
       "--chdir", this.#options.projectRoot,
       rscript, "--vanilla", this.#options.workerScript,
     );
     const child = spawn(this.#options.bwrap ?? process.env.PI_R_BWRAP ?? "bwrap", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "" },
+      env: { PATH: runtimePath },
     });
     this.#child = child;
     this.#environment = environment;
     this.#buffer = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.#receive(chunk));
-    let stderr = "";
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-8192); });
-    child.once("error", (error) => this.#crash(`R worker failed to start: ${error.message}`));
-    child.once("exit", (code, signal) => this.#crash(`R worker exited (${signal ?? code ?? "unknown"}): ${stderr.trim()}`));
+    child.stderr.on("data", (chunk: string) => {
+      this.#stderrTail = `${this.#stderrTail}${chunk}`.slice(-MAX_DIAGNOSTIC_TAIL);
+      this.#log?.write(`stderr: ${chunk}`);
+    });
+    child.once("error", (error) => this.#crash(`R worker failed to start: ${error.message}`, "WORKER_START_FAILED"));
+    child.once("exit", (code, signal) => this.#crash(`R worker exited (${signal ?? code ?? "unknown"})`, "WORKER_EXITED"));
     this.#setState("running");
     return true;
   }
@@ -284,11 +343,17 @@ export class SandboxedRWorker {
     while (newline >= 0) {
       const line = this.#buffer.slice(0, newline);
       this.#buffer = this.#buffer.slice(newline + 1);
+      if (!line.startsWith(RESPONSE_PREFIX)) {
+        this.#unexpectedStdoutTail = `${this.#unexpectedStdoutTail}${line}\n`.slice(-MAX_DIAGNOSTIC_TAIL);
+        this.#log?.write(`unexpected-stdout: ${line}\n`);
+        newline = this.#buffer.indexOf("\n");
+        continue;
+      }
       let response: WorkerResponse;
       try {
-        response = JSON.parse(line) as WorkerResponse;
+        response = JSON.parse(line.slice(RESPONSE_PREFIX.length)) as WorkerResponse;
       } catch {
-        this.#crash("R worker emitted invalid JSON");
+        this.#crash("R worker emitted an invalid framed response", "WORKER_PROTOCOL_ERROR");
         return;
       }
       const id = typeof response.id === "number" ? response.id : undefined;
@@ -302,7 +367,7 @@ export class SandboxedRWorker {
     }
   }
 
-  #crash(message: string): void {
+  #crash(message: string, code = "WORKER_CRASH"): void {
     if (this.#state === "crashed") return;
     const child = this.#child;
     if (child) {
@@ -313,7 +378,18 @@ export class SandboxedRWorker {
     this.#transientStateLost = true;
     this.#setState("crashed");
     const explanation = message ? `${message}; transient state was lost` : "R worker crashed; transient state was lost";
-    this.#rejectPending(new RecoverableError("WORKER_CRASH", explanation));
+    this.#lastCrash = {
+      code,
+      message: explanation,
+      environment: this.#environment,
+      logPath: this.#logPath,
+      stderrTail: this.#stderrTail.trim(),
+      unexpectedStdoutTail: this.#unexpectedStdoutTail.trim(),
+    };
+    this.#log?.write(`crash: ${code}: ${explanation}\n`);
+    this.#log?.end();
+    this.#log = undefined;
+    this.#rejectPending(new RecoverableError(code, explanation, this.#lastCrash as unknown as Record<string, unknown>));
   }
 
   #rejectPending(error: Error): void {

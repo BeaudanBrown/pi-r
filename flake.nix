@@ -11,13 +11,20 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          sandboxRuntimePath = pkgs.lib.makeBinPath [
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gawk
+            pkgs.gnugrep
+            pkgs.gnused
+          ];
           nixpkgsPin = pkgs.writeText "pi-r-nixpkgs-pin.json" (builtins.toJSON {
             owner = "NixOS";
             repo = "nixpkgs";
             inherit (nixpkgs) rev narHash lastModified;
           });
 
-          piResources = pkgs.runCommand "pi-r-resources-0.15.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.16.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources $out/share/pi-r/skills/pi-r/references $out/share/pi-r/docs
@@ -37,6 +44,7 @@
             cp ${./R/worker.R} $out/share/pi-r/R/worker.R
             cp ${./R/target_runner.R} $out/share/pi-r/R/target_runner.R
             cp ${./R/artifact_inspector.R} $out/share/pi-r/R/artifact_inspector.R
+            cp ${./R/data_inspector.R} $out/share/pi-r/R/data_inspector.R
             cp ${./resources/r-functions.scm} $out/share/pi-r/resources/r-functions.scm
             cp ${./resources/project-contract.schema.json} $out/share/pi-r/resources/project-contract.schema.json
             cp ${./resources/technology-policy-v1.json} $out/share/pi-r/resources/technology-policy-v1.json
@@ -52,7 +60,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.15.0";
+            version = "0.16.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -77,6 +85,7 @@
                 --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bubblewrap pkgs.tree-sitter rRuntime ]}" \
                 --set-default PI_R_RESOURCE_ROOT "${piResources}/share/pi-r" \
                 --set-default PI_R_NIXPKGS_PIN_PATH "${piResources}/share/pi-r/resources/nixpkgs-pin.json" \
+                --set-default PI_R_SANDBOX_PATH "${sandboxRuntimePath}" \
                 --set-default PI_R_TREE_SITTER "${pkgs.tree-sitter}/bin/tree-sitter" \
                 --set-default PI_R_TREE_SITTER_R "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser" \
                 --set-default PI_R_TREE_SITTER_QUERY "${piResources}/share/pi-r/resources/r-functions.scm" \
@@ -88,7 +97,8 @@
                 --set-default PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set-default PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
                 --set-default PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
-                --set-default PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R"
+                --set-default PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R" \
+                --set-default PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R"
               runHook postInstall
             '';
 
@@ -108,9 +118,11 @@
                 parserGrammar = "${pkgs.tree-sitter-grammars.tree-sitter-r}/parser";
                 parserQuery = "${piResources}/share/pi-r/resources/r-functions.scm";
                 sandbox = "${pkgs.bubblewrap}/bin/bwrap";
+                inherit sandboxRuntimePath;
                 worker = "${piResources}/share/pi-r/R/worker.R";
                 targetRunner = "${piResources}/share/pi-r/R/target_runner.R";
                 artifactInspector = "${piResources}/share/pi-r/R/artifact_inspector.R";
+                dataInspector = "${piResources}/share/pi-r/R/data_inspector.R";
                 contractReader = "${piResources}/share/pi-r/R/read_contract.R";
                 technologyPolicy = "${piResources}/share/pi-r/resources/technology-policy-v1.json";
                 nixpkgsPin = "${piResources}/share/pi-r/resources/nixpkgs-pin.json";
@@ -145,7 +157,7 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.15.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.16.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.jq pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -155,6 +167,8 @@
             test -x ${piR.resourcePaths.rscript}
             test -x ${piR.resourcePaths.parser}
             test -x ${piR.resourcePaths.sandbox}
+            test -x "$(printf '%s' ${pkgs.lib.escapeShellArg piR.resourcePaths.sandboxRuntimePath} | cut -d: -f1)/uname"
+            test -x "$(printf '%s' ${pkgs.lib.escapeShellArg piR.resourcePaths.sandboxRuntimePath} | cut -d: -f1)/rm"
             test -f ${piR.resourcePaths.extension}
             test -f ${piR.resourcePaths.scoutExtension}
             test -f ${piR.resourcePaths.skill}
@@ -165,6 +179,7 @@
             test -f ${piR.resourcePaths.worker}
             test -f ${piR.resourcePaths.targetRunner}
             test -f ${piR.resourcePaths.artifactInspector}
+            test -f ${piR.resourcePaths.dataInspector}
             test -f ${piR.resourcePaths.contractReader}
             test -f ${piR.resourcePaths.technologyPolicy}
             test -f ${piR.resourcePaths.nixpkgsPin}
@@ -195,11 +210,13 @@
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_NIXPKGS_PATH=${pkgs.path} \
               PI_R_NIXPKGS_PIN_PATH=${piR.resourcePaths.nixpkgsPin} \
+              PI_R_SANDBOX_PATH=${pkgs.lib.escapeShellArg piR.resourcePaths.sandboxRuntimePath} \
               PI_R_RESOURCE_ROOT=${piR.resourcePaths.root} \
               PI_R_SHARED_POLICY_PATH="$TMPDIR/pi-r-shared-technology-policy.json" \
               PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               PI_R_SCOUT_EXTENSION=${resources}/share/pi-r/extensions/pi-r-dependency-scout.ts \
               PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
+              PI_R_TEST_GIT_BIN=${pkgs.git}/bin \
               PI_R_TREE_SITTER=${pkgs.tree-sitter}/bin/tree-sitter \
               PI_R_TREE_SITTER_R=${pkgs.tree-sitter-grammars.tree-sitter-r}/parser \
               PI_R_TREE_SITTER_QUERY=${resources}/share/pi-r/resources/r-functions.scm \
@@ -210,8 +227,11 @@
               PI_R_WORKER_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_PROJECT_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
+              PI_R_REAL_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
+              PI_R_NOISY_WORKER_SCRIPT=${./tests/fixtures/noisy-worker.R} \
               PI_R_TARGET_RUNNER_SCRIPT=${resources}/share/pi-r/R/target_runner.R \
               PI_R_ARTIFACT_INSPECTOR_SCRIPT=${resources}/share/pi-r/R/artifact_inspector.R \
+              PI_R_DATA_INSPECTOR_SCRIPT=${resources}/share/pi-r/R/data_inspector.R \
               node --test ${./tests/workbench-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_EDIT_FIXTURE=${./tests/fixtures/representative.R} \

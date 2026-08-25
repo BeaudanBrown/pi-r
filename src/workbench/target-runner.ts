@@ -4,6 +4,7 @@ import { createWriteStream } from "node:fs";
 import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
+import { sandboxRuntimePath } from "./sandbox.js";
 
 export type TargetFreshness = "missing" | "outdated" | "current" | "failed";
 
@@ -19,6 +20,7 @@ export interface TargetStatus {
 export interface TargetListResult {
   targets: TargetStatus[];
   logPath: string;
+  diagnostics?: { stderrTail: string };
 }
 
 export interface TargetRunResult extends TargetListResult {
@@ -40,6 +42,7 @@ interface TargetRunnerOptions {
   rscript: string;
   runnerScript: string;
   bwrap?: string;
+  sandboxPath?: string;
   timeoutMs?: number;
   writableFiles?: string[];
 }
@@ -90,7 +93,7 @@ async function executeRunner(
   names: string[],
   options: TargetRunnerOptions,
   signal?: AbortSignal,
-): Promise<{ response: RunnerResponse; logPath: string }> {
+): Promise<{ response: RunnerResponse; logPath: string; stderrTail: string }> {
   if (!isAbsolute(options.rscript) || !isAbsolute(options.runnerScript)) {
     throw new RecoverableError("TARGET_RUNNER_START_FAILED", "Target runner runtime paths must be absolute");
   }
@@ -116,6 +119,7 @@ async function executeRunner(
   const log = createWriteStream(logPath, { flags: "wx" });
   log.write(`pi-r target runner\noperation=${operation}\nrequested=${names.join(",")}\n`);
 
+  const runtimePath = sandboxRuntimePath(options.sandboxPath);
   const args = [
     "--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     "--ro-bind", "/nix/store", "/nix/store",
@@ -132,6 +136,7 @@ async function executeRunner(
     "--setenv", "HOME", "/tmp/pi-r-target-home",
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LC_ALL", "C",
+    "--setenv", "PATH", runtimePath,
     "--chdir", options.projectRoot,
     options.rscript, "--vanilla", options.runnerScript,
   );
@@ -139,9 +144,10 @@ async function executeRunner(
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(options.bwrap ?? process.env.PI_R_BWRAP ?? "bwrap", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "" },
+      env: { PATH: runtimePath },
     });
     let stdout = "";
+    let stderrTail = "";
     let settled = false;
     const finishLog = () => new Promise<void>((resolveLog) => log.end(resolveLog));
     const fail = async (error: Error) => {
@@ -167,7 +173,10 @@ async function executeRunner(
       stdout = `${stdout}${chunk}`.slice(-MAX_RESULT_CAPTURE);
     });
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => log.write(`[stderr] ${chunk}`));
+    child.stderr.on("data", (chunk: string) => {
+      stderrTail = `${stderrTail}${chunk}`.slice(-2048);
+      log.write(`[stderr] ${chunk}`);
+    });
     child.once("error", (error) => { void fail(new RecoverableError("TARGET_RUNNER_START_FAILED", error.message, { logPath })); });
     child.once("close", async (code, exitSignal) => {
       if (settled) return;
@@ -185,7 +194,7 @@ async function executeRunner(
         if (response.ok !== true) {
           throw new RecoverableError(response.error?.code ?? "TARGET_RUNNER_FAILED", response.error?.message ?? "Target runner failed", { logPath });
         }
-        resolvePromise({ response, logPath });
+        resolvePromise({ response, logPath, stderrTail: stderrTail.trim() });
       } catch (error) {
         rejectPromise(error instanceof RecoverableError
           ? error
@@ -201,14 +210,14 @@ async function executeRunner(
 }
 
 export async function listTargets(names: string[], options: TargetRunnerOptions, signal?: AbortSignal): Promise<TargetListResult> {
-  const { response, logPath } = await executeRunner("list", names, options, signal);
+  const { response, logPath, stderrTail } = await executeRunner("list", names, options, signal);
   const targets = parseTargets(response.targets);
   if (targets.length !== names.length) throw new RecoverableError("INVALID_TARGET_RESULT", "Target runner returned an invalid target inventory", { logPath });
-  return { targets, logPath };
+  return { targets, logPath, ...(stderrTail ? { diagnostics: { stderrTail } } : {}) };
 }
 
 export async function runTargets(names: string[], options: TargetRunnerOptions, signal?: AbortSignal): Promise<TargetRunResult> {
-  const { response, logPath } = await executeRunner("run", names, options, signal);
+  const { response, logPath, stderrTail } = await executeRunner("run", names, options, signal);
   if (response.status !== "succeeded" && response.status !== "failed") {
     throw new RecoverableError("INVALID_TARGET_RESULT", "Target runner returned an invalid execution status", { logPath });
   }
@@ -222,5 +231,12 @@ export async function runTargets(names: string[], options: TargetRunnerOptions, 
         recovery: Array.isArray(response.error.recovery) ? response.error.recovery.filter((item: unknown): item is string => typeof item === "string") : [],
       }
     : null;
-  return { status: response.status, requested: names, targets: parseTargets(response.targets), error, logPath };
+  return {
+    status: response.status,
+    requested: names,
+    targets: parseTargets(response.targets),
+    error,
+    logPath,
+    ...(stderrTail ? { diagnostics: { stderrTail } } : {}),
+  };
 }

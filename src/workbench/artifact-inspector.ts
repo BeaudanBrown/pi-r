@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
+import { sandboxRuntimePath } from "./sandbox.js";
 import type { ArtifactKind, TargetDefinition } from "../contract/types.js";
 
 export type ArtifactFacet = "structure" | "summary";
@@ -27,6 +28,7 @@ interface InspectorOptions {
   rscript: string;
   inspectorScript: string;
   bwrap?: string;
+  sandboxPath?: string;
   timeoutMs?: number;
 }
 
@@ -107,6 +109,7 @@ export async function inspectArtifact(
     facets,
     cached,
   };
+  const runtimePath = sandboxRuntimePath(options.sandboxPath);
   const args = [
     "--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     "--ro-bind", "/nix/store", "/nix/store",
@@ -121,6 +124,7 @@ export async function inspectArtifact(
     "--setenv", "HOME", "/tmp/pi-r-inspector-home",
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LC_ALL", "C",
+    "--setenv", "PATH", runtimePath,
     "--chdir", options.projectRoot,
     options.rscript, "--vanilla", options.inspectorScript,
   );
@@ -128,7 +132,7 @@ export async function inspectArtifact(
   const raw = await new Promise<unknown>((resolvePromise, rejectPromise) => {
     const child = spawn(options.bwrap ?? process.env.PI_R_BWRAP ?? "bwrap", args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { PATH: process.env.PATH ?? "" },
+      env: { PATH: runtimePath },
     });
     let stdout = "";
     let stderr = "";

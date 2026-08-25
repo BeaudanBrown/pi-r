@@ -4,9 +4,9 @@ A Workbench Session exposes three structured exploration tools in Design and Imp
 
 - `evaluate_r` evaluates temporary code and names every target to load explicitly;
 - `r_worker_status` explicitly lists current object names, origins, classes, and approximate serialized sizes; and
-- `r_worker_reset` discards all transient state and reports how many objects were lost.
+- `r_worker_reset` discards all transient state, starts a fresh worker, probes its framed protocol, and reports both object loss and environment health.
 
-The worker starts lazily on the first evaluation. Assignments remain available across calls until reset, crash, contract lock, or session shutdown. Exploration never changes Git provenance or durable source.
+`/r start` first probes the exact bundled worker protocol before changing Git state. The session worker then starts lazily on the first evaluation. Assignments remain available across calls until reset, crash, contract lock, or session shutdown. Exploration never changes Git provenance or durable source.
 
 ## Runtime transition
 
@@ -16,7 +16,7 @@ Each evaluation reloads project globals and constants under their canonical name
 
 ## Bubblewrap filesystem
 
-The worker process runs inside Bubblewrap. The Nix store, minimal system runtime, canonical project root, and attached Read-Only Roots are mounted read-only. `/tmp` and the worker home are ephemeral and writable. The network remains available in version one, as required by the Workbench Session policy.
+The worker process runs inside Bubblewrap. The Nix store, minimal system runtime, canonical project root, and attached Read-Only Roots are mounted read-only. Its `PATH` is replaced with an immutable Nix-store runtime containing only the basic utilities required by R; inaccessible host profile paths are never inherited. `/tmp` and the worker home are ephemeral and writable. The network remains available in version one, as required by the Workbench Session policy.
 
 Consequently, exploratory code can read approved inputs and create temporary files but cannot mutate project or attached source. Shell, edit, and write capabilities remain unavailable to the model outside the worker.
 
@@ -32,4 +32,6 @@ Evaluation returns separate fields for:
 
 The extension retains the bounded inventory from each operation as runtime state and projects it through the non-persistent [Current-State HUD](workbench-session.md#current-state-hud) before every model call. Routine evaluation tool results do not repeat it. Model-facing evaluation output is capped at approximately 8 KiB, while the live-state projection is capped at 4 KiB and 50 displayed objects. Protocol frames, values, conditions, previews, and inventories have independent limits to prevent an accidental data dump from expanding model context.
 
-A worker crash fails the active request with `WORKER_CRASH` and explicitly reports transient-state loss. The next evaluation starts a clean worker and marks `transientStateLost`. Cancellation and timeout also stop the worker rather than leaving an uncontrolled evaluation running. Requests time out after 30 seconds; generated-environment resolution has a separate bounded startup timeout.
+Worker responses use explicit `PI_R_RESPONSE:` framing, so unexpected process stdout is retained as diagnostics rather than parsed as protocol JSON. Each process writes a mode-0600 diagnostic log under `.pi/tmp/pi-r-worker/`. Crash errors and `r_worker_status` expose the bounded stderr/unexpected-stdout tail and log path without placing the complete log in model context.
+
+A worker crash fails the active request with a specific startup, exit, timeout, or protocol code and explicitly reports transient-state loss. The next evaluation starts a clean worker and marks `transientStateLost`. Cancellation and timeout also stop the worker rather than leaving an uncontrolled evaluation running. Requests time out after 30 seconds; generated-environment resolution has a separate bounded startup timeout.

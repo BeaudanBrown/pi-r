@@ -64,9 +64,17 @@ _Avoid_: Edit, write
 The SHA-256 token returned by Approved Function inspection and required by a Scoped Mutation to reject stale source.
 _Avoid_: Version, checksum
 
+**Sandbox Runtime**:
+The immutable minimal Nix-store `PATH` shared by every Bubblewrap R helper instead of inheriting inaccessible or mutable host profile commands.
+_Avoid_: System PATH, host tools
+
 **Persistent R Worker**:
-The session-scoped Bubblewrap process that evaluates bounded temporary R code while project and attached source remain read-only.
+The session-scoped Bubblewrap process that evaluates bounded temporary R code through framed responses while project and attached source remain read-only.
 _Avoid_: REPL, R session
+
+**Raw Data Inspection**:
+Bounded read-only structure and row sampling for CSV/TSV inputs under a Read-Only Root before a contracted target exists.
+_Avoid_: Artifact inspection, file dump
 
 **Transient State**:
 Non-durable assignments and explicitly loaded target objects held by the Persistent R Worker until reset, crash, lock, or shutdown.

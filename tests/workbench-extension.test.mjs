@@ -238,7 +238,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.equal(h.appended[0].customType, "pi-r-workbench-state");
   assert.equal(h.appended[0].data.phase, "design");
   assert.deepEqual(h.appended[0].data.readOnlyRoots, [await realpath(attached)]);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset", "r_data_inspect", ]);
   const patterns = h.tools.flatMap((tool) => schemaPatterns(tool.parameters));
   assert.ok(patterns.length > 0);
   assert.equal(patterns.every((pattern) => pattern.startsWith("^") && pattern.endsWith("$")), true, `local llama.cpp requires anchored JSON Schema patterns: ${patterns.join(", ")}`);
@@ -264,6 +264,28 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   const resumedContext = context(root, h.appended);
   await resumed.handlers.get("session_start")({}, resumedContext);
   assert.equal(resumed.activeToolChanges.length, 0, "an explicit stop marker must prevent later session resume");
+});
+
+test("/r start preflight rejects an unavailable sandbox runtime before Git mutation", async () => {
+  const root = await repository();
+  await writeFile(join(root, "analysis.R"), "value <- 2\n");
+  const branch = await git(root, "branch", "--show-current");
+  const head = await git(root, "rev-parse", "HEAD");
+  const previous = process.env.PI_R_SANDBOX_PATH;
+  process.env.PI_R_SANDBOX_PATH = "/run/current-system/sw/bin";
+  const h = harness();
+  const ctx = context(root);
+  try {
+    await h.commands[0].options.handler("start", ctx);
+  } finally {
+    process.env.PI_R_SANDBOX_PATH = previous;
+  }
+  assert.equal(await git(root, "branch", "--show-current"), branch);
+  assert.equal(await git(root, "rev-parse", "HEAD"), head);
+  assert.equal(await git(root, "stash", "list"), "");
+  assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 2\n");
+  assert.equal(h.appended.length, 0);
+  assert.match(ctx.notifications.at(-1)[0], /pi-r start failed/i);
 });
 
 test("/r start rejects a Git repository without HEAD and stays inactive", async () => {
@@ -296,6 +318,26 @@ test("design mode gates model tools to reads inside approved roots", async () =>
   assert.equal((await gate({ toolName: "read", input: { path: join(outside, "secret.txt") } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "bash", input: { command: "pwd" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path: join(root, "x") } }, ctx)).block, true);
+});
+
+test("design mode inspects bounded raw CSV data without requiring a target", async () => {
+  const root = await repository();
+  await writeFile(join(root, "input.csv"), "group,value\na,1\nb,\n");
+  const outside = await mkdtemp(join(tmpdir(), "pi-r-data-outside-"));
+  await writeFile(join(outside, "secret.csv"), "secret\n1\n");
+  const h = harness();
+  const ctx = context(root);
+  await h.commands[0].options.handler("start", ctx);
+  const inspect = h.tools.find((tool) => tool.name === "r_data_inspect");
+  assert.ok(inspect);
+  const result = await inspect.execute("inspect-data", { path: "input.csv", maxRows: 100 }, undefined, undefined, ctx);
+  assert.equal(result.details.sampledRows, 2);
+  assert.deepEqual(result.details.columns.map((column) => column.name), ["group", "value"]);
+  assert.equal(result.details.columns.find((column) => column.name === "value").missing, 1);
+  await assert.rejects(
+    inspect.execute("outside", { path: join(outside, "secret.csv") }, undefined, undefined, ctx),
+    /DATA_PATH_OUTSIDE_ROOTS/,
+  );
 });
 
 test("active workbench projects one replaceable live-state snapshot into agent context", async () => {
@@ -336,10 +378,17 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
   assert.ok(evaluate, "Design Mode must expose structured R evaluation");
 
-  const first = await evaluate.execute("evaluate-1", {
-    code: "message('hello')\nwarning('careful')\nx <- 41L\nx + 1L",
-    targets: [],
-  }, undefined, undefined, ctx);
+  const previousPath = process.env.PATH;
+  process.env.PATH = process.env.PI_R_TEST_GIT_BIN;
+  let first;
+  try {
+    first = await evaluate.execute("evaluate-1", {
+      code: "message('hello')\nwarning('careful')\nx <- 41L\nx + 1L",
+      targets: [],
+    }, undefined, undefined, ctx);
+  } finally {
+    process.env.PATH = previousPath;
+  }
   assert.equal(first.details.value, 42);
   assert.match(first.details.preview, /42/);
   assert.deepEqual(first.details.messages, ["hello"]);
@@ -377,6 +426,25 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(boundedSnapshot.objectsTruncated, true);
   assert.ok(boundedSnapshot.objects.length <= 50);
   assert.ok(boundedMessage.content.length <= 4096);
+});
+
+test("framed worker responses tolerate and log unexpected process stdout", { timeout: 30_000 }, async (t) => {
+  const root = await repository();
+  const previousScript = process.env.PI_R_WORKER_SCRIPT;
+  process.env.PI_R_WORKER_SCRIPT = process.env.PI_R_NOISY_WORKER_SCRIPT;
+  const h = harness();
+  const ctx = context(root);
+  t.after(async () => {
+    process.env.PI_R_WORKER_SCRIPT = previousScript;
+    await h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx);
+  });
+  await h.commands[0].options.handler("start", ctx);
+  const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
+    .execute("noisy", { code: "1L", targets: [] }, undefined, undefined, ctx);
+  assert.equal(evaluated.details.value, 1);
+  const status = await h.tools.find((tool) => tool.name === "r_worker_status")
+    .execute("status", {}, undefined, undefined, ctx);
+  assert.match(await readFile(status.details.logPath, "utf8"), /unexpected-stdout: unframed startup diagnostic/);
 });
 
 test("the worker can write temporary storage but cannot mutate project or attached source", { timeout: 30_000 }, async (t) => {
@@ -429,17 +497,23 @@ test("worker status, reset, and crash recovery report transient state loss", { t
   const cleared = await reset.execute("reset", {}, undefined, undefined, ctx);
   assert.ok(cleared.details.lostObjects >= 1);
   assert.match(cleared.content[0].text, /transientStateLost.*true/);
-  assert.equal((await status.execute("stopped", {}, undefined, undefined, ctx)).details.state, "stopped");
+  assert.equal(cleared.details.environmentHealthy, true);
+  assert.equal(cleared.details.workerState, "running");
+  assert.equal((await status.execute("restarted", {}, undefined, undefined, ctx)).details.state, "running");
   const resetSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
-  assert.equal(resetSnapshot.worker.state, "stopped");
+  assert.equal(resetSnapshot.worker.state, "running");
   assert.equal(resetSnapshot.worker.transientStateLost, true);
   assert.equal(resetSnapshot.worker.targetsCache, "preserved");
   assert.deepEqual(resetSnapshot.objects, []);
 
   await assert.rejects(
     evaluate.execute("crash", { code: "quit(save = 'no', status = 17L)", targets: [] }, undefined, undefined, ctx),
-    /WORKER_CRASH.*transient state was lost/i,
+    /WORKER_(?:CRASH|EXITED).*transient state was lost/i,
   );
+  const crashed = await status.execute("crashed", {}, undefined, undefined, ctx);
+  assert.equal(crashed.details.state, "crashed");
+  assert.match(crashed.details.lastCrash.code, /^WORKER_/);
+  assert.match(crashed.details.lastCrash.logPath, /[.]pi\/tmp\/pi-r-worker\//);
   const recovered = await evaluate.execute("recover", { code: "1L", targets: [] }, undefined, undefined, ctx);
   assert.equal(recovered.details.value, 1);
   assert.equal(recovered.details.worker.started, true);
@@ -494,7 +568,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -1023,7 +1097,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);
@@ -1116,7 +1190,7 @@ test("persisted workbench state resumes only when project and branch still match
   const resumed = harness(entries);
   const resumedContext = context(root, entries);
   await resumed.handlers.get("session_start")({ reason: "resume" }, resumedContext);
-  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset"]);
+  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset", "r_data_inspect", ]);
   await resumed.commands[0].options.handler("status", resumedContext);
   assert.match(resumedContext.notifications.at(-1)[0], /phase=design .*branch=pi-r\/workbench@/);
 

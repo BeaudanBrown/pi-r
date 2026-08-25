@@ -6,7 +6,7 @@ Only `/r` is registered. No R-specific tool or runtime guidance is active. `/r s
 
 ## Design Mode
 
-The active surface is read-only plus contract proposal and bounded R exploration/status/reset capabilities. `r_contract_propose` replaces one ignored draft. The proposal contains only project decisions; pi-r injects `contractVersion`, `templateVersion`, `policyVersion`, and the exact packaged Nixpkgs pin locally. Never invent revision, hash, or timestamp placeholders. User-only `/r lock` validates the draft again, previews semantic and generated-source changes, publishes the deterministic scaffold transactionally, and creates one provenance commit.
+The active surface is read-only plus contract proposal, bounded raw CSV/TSV inspection, and bounded R exploration/status/reset capabilities. Use `r_data_inspect` before a target exists; `r_artifact_inspect` remains target-only. `r_contract_propose` replaces one ignored draft. The proposal contains only project decisions; pi-r injects `contractVersion`, `templateVersion`, `policyVersion`, and the exact packaged Nixpkgs pin locally. Never invent revision, hash, or timestamp placeholders. User-only `/r lock` validates the draft again, previews semantic and generated-source changes, publishes the deterministic scaffold transactionally, and creates one provenance commit.
 
 A semantically empty design is valid:
 

@@ -1,5 +1,6 @@
-import { access, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { access, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
 import { normalizeContractProposal, validateContract } from "../src/contract/contract.js";
@@ -12,6 +13,7 @@ import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerObject, type WorkerState } from "../src/workbench/r-worker.js";
 import { listTargets, runTargets } from "../src/workbench/target-runner.js";
 import { inspectArtifact, type ArtifactFacet } from "../src/workbench/artifact-inspector.js";
+import { inspectData } from "../src/workbench/data-inspector.js";
 import {
   discardEnvironmentCandidate,
   ENVIRONMENT_PATHS,
@@ -31,6 +33,7 @@ const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const ARTIFACT_TOOL = "r_artifact_inspect";
+const DATA_TOOL = "r_data_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
 const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-live-state";
@@ -46,6 +49,16 @@ const CONTRACT_PROPOSAL_SCHEMA = (() => {
   delete schema.properties.project.properties.nixpkgs;
   return schema;
 })();
+
+const DATA_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["path"],
+  properties: {
+    path: { type: "string", minLength: 1, maxLength: 500 },
+    maxRows: { type: "integer", minimum: 1, maximum: 1000 },
+  },
+} as const;
 
 const EVALUATE_SCHEMA = {
   type: "object",
@@ -349,6 +362,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let workerRegistered = false;
   let targetRegistered = false;
   let artifactRegistered = false;
+  let dataRegistered = false;
   let environmentRegistered = false;
   let scoutRegistered = false;
   let worker: SandboxedRWorker | undefined;
@@ -445,12 +459,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
 
   function phaseTools(phase: Phase): string[] {
     const workerTools = workerRegistered ? [...WORKER_TOOLS] : [];
-    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools];
+    const dataTools = dataRegistered ? [DATA_TOOL] : [];
+    if (phase === "design" && proposalRegistered) return [...safeReadTools(), "r_contract_propose", ...workerTools, ...dataTools];
     const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
     const artifactTools = artifactRegistered ? [ARTIFACT_TOOL] : [];
     const environmentTools = environmentRegistered ? [ENVIRONMENT_TOOL] : [];
     const scoutTools = scoutRegistered ? [SCOUT_TOOL] : [];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools, ...environmentTools, ...scoutTools];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...dataTools, ...targetTools, ...artifactTools, ...environmentTools, ...scoutTools];
     return safeReadTools();
   }
 
@@ -461,6 +476,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       readOnlyRoots: state.readOnlyRoots,
       workerScript: process.env.PI_R_WORKER_SCRIPT ?? "",
       bwrap: process.env.PI_R_BWRAP,
+      sandboxPath: process.env.PI_R_SANDBOX_PATH,
       onState(nextState) {
         if (state) state = { ...state, workerState: nextState };
         if (nextState !== "running") {
@@ -598,16 +614,41 @@ export default function piRExtension(pi: ExtensionAPI): void {
       parameters: EMPTY_SCHEMA,
       async execute(_toolCallId, _params, _signal, _onUpdate, context) {
         await assertWorkerProvenance(context);
-        const reset = worker ? await worker.reset() : { lostObjects: 0, reason: "reset requested" };
-        worker = undefined;
+        const instance = workerInstance();
+        const reset = await instance.reset();
+        const environment: WorkerEnvironment = state?.phase === "implementation" ? "project" : "design";
+        const runtime = await workerRuntime(environment);
+        let result: Record<string, unknown>;
+        try {
+          await instance.healthCheck(environment, runtime);
+          result = {
+            ...reset,
+            reset: "completed",
+            environmentHealthy: true,
+            workerState: "running",
+            transientStateLost: reset.lostObjects > 0,
+            targetsCache: "preserved",
+          };
+        } catch {
+          const diagnostics = await instance.status();
+          result = {
+            ...reset,
+            reset: "failed",
+            environmentHealthy: false,
+            workerState: diagnostics.state,
+            transientStateLost: reset.lostObjects > 0,
+            targetsCache: "preserved",
+            ...(diagnostics.lastCrash ? { lastCrash: diagnostics.lastCrash } : {}),
+          };
+        }
         updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "worker-reset");
         if (state) {
-          state = { ...state, workerState: "stopped" };
+          state = { ...state, workerState: instance.state };
           showHud(context, state);
         }
         return {
-          content: [{ type: "text", text: boundedJson({ ...reset, transientStateLost: reset.lostObjects > 0, targetsCache: "preserved" }) }],
-          details: reset,
+          content: [{ type: "text", text: boundedJson(result) }],
+          details: result,
         };
       },
     });
@@ -745,6 +786,51 @@ export default function piRExtension(pi: ExtensionAPI): void {
             state = { ...state, workerState: worker?.state ?? "stopped" };
             showHud(context, state);
           }
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+  }
+
+  function registerDataTool(): void {
+    if (dataRegistered) return;
+    dataRegistered = true;
+    pi.registerTool({
+      name: DATA_TOOL,
+      label: "Inspect raw tabular data",
+      description: "Inspect a bounded sample of one CSV or TSV inside the project or an attached Read-Only Root without creating a target.",
+      promptSnippet: "Inspect raw tabular inputs through bounded structure and row samples before designing targets",
+      parameters: DATA_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        try {
+          await assertWorkerProvenance(context);
+          if (!state) throw new RecoverableError("INVALID_PHASE", "Raw data inspection requires an active Workbench Session");
+          const input = params as { path?: unknown; maxRows?: unknown };
+          if (typeof input.path !== "string") throw new RecoverableError("INVALID_REQUEST", "Raw data inspection requires a path");
+          const requested = isAbsolute(input.path) ? input.path : resolve(state.projectRoot, input.path.replace(/^@/, ""));
+          const canonical = await realpath(requested).catch(() => undefined);
+          const roots = [state.projectRoot, ...state.readOnlyRoots];
+          const permitted = canonical !== undefined && roots.some((root) => {
+            const rel = relative(root, canonical);
+            return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+          });
+          if (!permitted || !canonical) throw new RecoverableError("DATA_PATH_OUTSIDE_ROOTS", "Raw data path is outside approved Read-Only Roots");
+          const metadata = await lstat(canonical);
+          if (!metadata.isFile() || metadata.isSymbolicLink()) throw new RecoverableError("INVALID_DATA_PATH", "Raw data path must be one regular file");
+          if (metadata.size > 2 * 1024 * 1024 * 1024) throw new RecoverableError("DATA_FILE_TOO_LARGE", "Raw data inspection is limited to files at most 2 GiB");
+          if (!/[.](?:csv|tsv)$/i.test(canonical)) throw new RecoverableError("UNSUPPORTED_DATA_FORMAT", "Raw data inspection currently supports CSV and TSV files");
+          const environment: WorkerEnvironment = state.phase === "implementation" ? "project" : "design";
+          const runtime = await workerRuntime(environment);
+          const result = await inspectData(canonical, typeof input.maxRows === "number" ? input.maxRows : 100, {
+            projectRoot: state.projectRoot,
+            readOnlyRoots: state.readOnlyRoots,
+            rscript: runtime,
+            inspectorScript: process.env.PI_R_DATA_INSPECTOR_SCRIPT ?? "",
+            bwrap: process.env.PI_R_BWRAP,
+            sandboxPath: process.env.PI_R_SANDBOX_PATH,
+          }, signal);
           return { content: [{ type: "text", text: boundedJson(result) }], details: result };
         } catch (error) {
           throw actionableToolError(error);
@@ -1084,6 +1170,32 @@ export default function piRExtension(pi: ExtensionAPI): void {
     return realpath(path);
   }
 
+  async function preflightWorker(
+    projectRoot: string,
+    readOnlyRoots: string[],
+    environment: WorkerEnvironment,
+    rscript: string,
+  ): Promise<void> {
+    const logDirectory = await mkdtemp(join(tmpdir(), "pi-r-worker-preflight-"));
+    const probe = new SandboxedRWorker({
+      projectRoot,
+      readOnlyRoots,
+      workerScript: process.env.PI_R_WORKER_SCRIPT ?? "",
+      bwrap: process.env.PI_R_BWRAP,
+      sandboxPath: process.env.PI_R_SANDBOX_PATH,
+      requestTimeoutMs: 10_000,
+      logDirectory,
+    });
+    try {
+      await probe.healthCheck(environment, rscript);
+      probe.stop(false);
+      await rm(logDirectory, { recursive: true, force: true });
+    } catch (error) {
+      probe.stop(true);
+      throw error;
+    }
+  }
+
   async function start(rootArguments: string[], context: CommandContext): Promise<void> {
     const workingDirectory = await realpath(context.cwd);
     const rootResult = await git(["rev-parse", "--show-toplevel"], workingDirectory);
@@ -1096,6 +1208,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
       readOnlyRoots.push(await approvedRoot(requested));
     }
     const uniqueRoots = [...new Set(readOnlyRoots)].sort();
+    const designRuntime = process.env.PI_R_RSCRIPT;
+    if (!designRuntime) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
+    await preflightWorker(projectRoot, uniqueRoots, "design", designRuntime);
 
     const dirty = await git(["status", "--porcelain", "--untracked-files=no"], workingDirectory);
     if (dirty.stdout.trim()) {
@@ -1128,6 +1243,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     previousActiveTools ??= pi.getActiveTools();
     registerProposalTool();
     registerWorkerTools();
+    registerDataTool();
     const next: WorkbenchState = {
       version: 1,
       phase: "design",
@@ -1405,6 +1521,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       contract,
       (command, args, options) => pi.exec(command, args, options),
     );
+    await preflightWorker(state.projectRoot, state.readOnlyRoots, "project", validatedEnvironment.runtime);
     const diff = await sourceDiff(state.projectRoot, files);
     state = { ...state, pendingApproval: "contract-lock" };
     showHud(context, state);
@@ -1442,6 +1559,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return;
       }
       registerWorkerTools();
+      registerDataTool();
       if (restored.phase === "design") registerProposalTool();
       if (restored.phase === "implementation") {
         registerEditTool();
@@ -1475,6 +1593,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     }
     if (event.toolName === "r_contract_propose" && state.phase === "design") return undefined;
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
+    if (event.toolName === DATA_TOOL) return undefined;
     if ((TARGET_TOOLS as readonly string[]).includes(event.toolName) && state.phase === "implementation") return undefined;
     if (event.toolName === ARTIFACT_TOOL && state.phase === "implementation") return undefined;
     if (event.toolName === ENVIRONMENT_TOOL && state.phase === "implementation") return undefined;
@@ -1522,7 +1641,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
       : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
-    const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
+    const exploration = " Use r_data_inspect for bounded CSV/TSV inputs before targets exist. Use evaluate_r for bounded temporary computation; target objects must be requested explicitly by canonical name. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
     };
@@ -1593,6 +1712,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             storedCandidate.proposal,
             (command, args, options) => pi.exec(command, args, options),
           );
+          await preflightWorker(state.projectRoot, state.readOnlyRoots, "project", candidate.runtime);
           state = { ...state, pendingApproval: "environment-change" };
           showHud(context, state);
           const diff = await sourceDiff(state.projectRoot, new Map(Object.entries(candidate.files)));

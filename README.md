@@ -28,7 +28,7 @@ Inspect the exported Pi resource paths:
 nix eval --json .#packages.$(nix eval --raw --impure --expr builtins.currentSystem).pi-r.resourcePaths
 ```
 
-The stable interface includes the CLI/R runtime, main and scout extensions, formatter, Tree-sitter parser/grammar/query, Bubblewrap sandbox, compact skill/reference, and worker/target helper paths. See [Pi launcher integration](docs/harness-integration.md) for normal pi-harness and lean local-model wiring.
+The stable interface includes the CLI/R runtime, main and scout extensions, formatter, Tree-sitter parser/grammar/query, Bubblewrap sandbox, compact skill/reference, deterministic sandbox runtime, and worker/target/raw-data helper paths. See [Pi launcher integration](docs/harness-integration.md) for normal pi-harness and lean local-model wiring.
 
 The extension resource can be tried with Pi using the `extension` path reported above. It exposes only `/r` while inactive. In a Git repository with a commit, start or inspect a constrained design session with:
 
@@ -50,7 +50,7 @@ Confirmation writes the complete scaffold, creates one provenance commit, and en
 
 Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked names and signatures, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
 
-Both constrained phases expose bounded temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. One non-persistent Current-State HUD gives every agent call the latest bounded worker/object inventory without accumulating stale snapshots. See [Persistent sandboxed R exploration](docs/r-worker.md).
+Both constrained phases expose bounded raw CSV/TSV inspection and temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. One non-persistent Current-State HUD gives every agent call the latest bounded worker/object inventory without accumulating stale snapshots. See [Persistent sandboxed R exploration](docs/r-worker.md).
 
 Implementation Mode can list and run only contracted targets through a separate controlled runner. Full-pipeline execution is explicit, complete logs remain local, failures return bounded target/traceback details, and saved failed workspaces can be loaded into temporary worker state. See [Controlled target operations](docs/target-operations.md).
 

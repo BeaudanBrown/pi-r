@@ -8,7 +8,7 @@ Implementation Mode exposes three typed target capabilities without exposing a s
 
 ## Listing and freshness
 
-The bounded target inventory combines the locked Project Contract with local `targets` metadata. Each entry includes the producer function, Artifact Kind, canonical arguments, Dynamic Pattern, freshness (`missing`, `outdated`, `current`, or `failed`), size/time metadata when available, and bounded warning/error text. Contracts are capped at 200 targets and model-facing JSON is capped at approximately 8 KiB. Every runner invocation also records its complete stdout and stderr under `.pi/tmp/pi-r-target-runs/`.
+The bounded target inventory combines the locked Project Contract with local `targets` metadata. Each entry includes the producer function, Artifact Kind, canonical arguments, Dynamic Pattern, freshness (`missing`, `outdated`, `current`, or `failed`), size/time metadata when available, and bounded warning/error text. Contracts are capped at 200 targets and model-facing JSON is capped at approximately 8 KiB. Every runner invocation also records its complete stdout and stderr under `.pi/tmp/pi-r-target-runs/`. When process-level stderr is non-empty, the result includes a bounded `diagnostics.stderrTail` so the root cause is visible without guessing which log to read.
 
 ## Explicit execution
 
