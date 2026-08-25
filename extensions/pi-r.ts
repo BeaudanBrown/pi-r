@@ -1190,7 +1190,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
   function actionableToolError(error: unknown): Error {
     if (error instanceof RecoverableError) {
       const details = error.structured.details ? ` ${JSON.stringify(error.structured.details)}` : "";
-      return new Error(`${error.structured.code}: ${error.message}${details}`);
+      const retry = error.structured.retryable === false ? " Retryable: no." : "";
+      const action = error.structured.agentAction ? ` Agent action: ${error.structured.agentAction}.` : "";
+      return new Error(`${error.structured.code}: ${error.message}.${retry}${action}${details}`);
     }
     return error instanceof Error ? error : new Error(String(error));
   }

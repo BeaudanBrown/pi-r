@@ -87,11 +87,37 @@ export async function assertTreeSitterParse(path: string): Promise<void> {
       ],
       { maxBuffer: 1024 * 1024 },
     );
-  } catch {
+  } catch (error) {
+    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
+    const diagnostic = [failure.stderr, failure.stdout]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim())
+      .join("\n")
+      .slice(0, 2000);
+    if (/unexpected argument|unknown (?:argument|option)|unrecognized option/i.test(diagnostic)) {
+      throw new RecoverableError(
+        "RUNTIME_INCOMPATIBLE",
+        "Tree-sitter CLI is incompatible with the packaged R parser",
+        { validator: "tree-sitter", phase: "parse", diagnostic },
+        {
+          retryable: false,
+          agentAction: "Do not change the R candidate; restart with one coherent pi-r runtime",
+        },
+      );
+    }
+    if (failure.code !== 1) {
+      throw new RecoverableError(
+        "TREE_SITTER_FAILURE",
+        "Tree-sitter could not validate the R candidate",
+        { validator: "tree-sitter", phase: "parse", ...(diagnostic ? { diagnostic } : {}) },
+        { retryable: false, agentAction: "Do not retry the edit; report the validator failure to the operator" },
+      );
+    }
     throw new RecoverableError(
       "INVALID_R_SYNTAX",
       "Candidate failed Tree-sitter structural validation",
-      { validator: "tree-sitter" },
+      { validator: "tree-sitter", ...(diagnostic ? { diagnostic } : {}) },
+      { retryable: true, agentAction: "Correct the candidate R syntax before retrying" },
     );
   }
 }

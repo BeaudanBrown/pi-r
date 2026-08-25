@@ -2,6 +2,8 @@ export interface StructuredError {
   code: string;
   message: string;
   recoverable: boolean;
+  retryable?: boolean;
+  agentAction?: string;
   details?: Record<string, unknown>;
 }
 
@@ -12,10 +14,22 @@ export type Envelope<T> =
 export class RecoverableError extends Error {
   readonly structured: StructuredError;
 
-  constructor(code: string, message: string, details?: Record<string, unknown>) {
+  constructor(
+    code: string,
+    message: string,
+    details?: Record<string, unknown>,
+    behavior?: { retryable?: boolean; agentAction?: string },
+  ) {
     super(message);
     this.name = "RecoverableError";
-    this.structured = { code, message, recoverable: true, ...(details ? { details } : {}) };
+    this.structured = {
+      code,
+      message,
+      recoverable: true,
+      ...(behavior?.retryable === undefined ? {} : { retryable: behavior.retryable }),
+      ...(behavior?.agentAction ? { agentAction: behavior.agentAction } : {}),
+      ...(details ? { details } : {}),
+    };
   }
 }
 
