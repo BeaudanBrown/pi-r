@@ -94,10 +94,10 @@ export async function assertTreeSitterParse(path: string): Promise<void> {
       .map((value) => value.trim())
       .join("\n")
       .slice(0, 2000);
-    if (/unexpected argument|unknown (?:argument|option)|unrecognized option/i.test(diagnostic)) {
+    if (/unexpected argument|unknown (?:argument|option)|unrecognized option|failed to (?:load|open)|cannot (?:load|open)|language .*not found|parser .*not found|grammar .*not found|incompatible (?:language|parser|abi)|shared object|dlopen/i.test(diagnostic)) {
       throw new RecoverableError(
         "RUNTIME_INCOMPATIBLE",
-        "Tree-sitter CLI is incompatible with the packaged R parser",
+        "Tree-sitter CLI or parser is incompatible with the packaged R grammar",
         { validator: "tree-sitter", phase: "parse", diagnostic },
         {
           retryable: false,

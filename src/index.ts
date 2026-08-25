@@ -9,7 +9,8 @@ export type { ApprovalScope, PackagePolicyDecision, PackagePolicyStatus, Resolve
 export { createEditCandidate } from "./r-edit/scoped-edit.js";
 export { errorEnvelope, RecoverableError } from "./r-edit/errors.js";
 export type { StructuredError } from "./r-edit/errors.js";
-export { inspectRFile } from "./r-edit/tree-sitter.js";
+export { assertTreeSitterParse, inspectRFile } from "./r-edit/tree-sitter.js";
+export { assertBaseRParse } from "./r-edit/tooling.js";
 export { validateContractEnvironment } from "./workbench/environment-governance.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 

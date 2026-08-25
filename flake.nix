@@ -98,7 +98,11 @@
                 --set PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
                 --set PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
                 --set PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R" \
-                --set PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R"
+                --set PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R" \
+                --unset PI_R_TEST_TREE_SITTER \
+                --unset PI_R_TEST_TREE_SITTER_R \
+                --unset PI_R_TEST_TREE_SITTER_QUERY \
+                --unset PI_R_TEST_BASE_RSCRIPT
               runHook postInstall
             '';
 

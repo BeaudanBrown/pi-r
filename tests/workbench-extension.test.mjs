@@ -383,6 +383,18 @@ test("/r start preflight rejects an unavailable sandbox runtime before Git mutat
   assert.match(ctx.notifications.at(-1)[0], /pi-r start failed/i);
 });
 
+test("/r lock while inactive clears transient locking progress", async () => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root);
+
+  await h.commands[0].options.handler("lock", ctx);
+
+  assert.equal(ctx.statuses.at(-1)[1], undefined);
+  assert.equal(ctx.widgets.at(-1)[1], undefined);
+  assert.match(ctx.notifications.at(-1)[0], /Contract lock requires active Design or Contract Revision Mode/);
+});
+
 test("/r start rejects a Git repository without HEAD and stays inactive", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-r-headless-"));
   await git(root, "init", "-q");

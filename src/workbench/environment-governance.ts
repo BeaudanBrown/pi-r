@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { validateContract } from "../contract/contract.js";
 import { renderScaffold } from "../contract/scaffold.js";
@@ -102,36 +102,42 @@ async function validateCandidateEnvironment(
   runner: CommandRunner,
 ): Promise<string> {
   const nix = process.env.PI_R_NIX ?? "nix";
+  const runtimeReceipt = resolve(staging, ".pi-r-runtime-path");
   const validationCode = [
     "args <- commandArgs(TRUE)",
     "parse(file = args[[1L]])",
-    "packages <- args[-1L]",
+    "packages <- args[-c(1L, 2L)]",
     "missing <- packages[!vapply(packages, requireNamespace, logical(1L), quietly = TRUE)]",
     "if (length(missing)) stop(sprintf('packages failed to load: %s', paste(missing, collapse = ', ')), call. = FALSE)",
-    "cat(sprintf('PI_R_RUNTIME:%s\\n', unname(Sys.which('Rscript'))))",
+    "writeLines(unname(Sys.which('Rscript')), args[[2L]], useBytes = TRUE)",
   ].join("; ");
   const explicitRuntime = process.env.PI_R_PROJECT_RSCRIPT;
   const validation = explicitRuntime
     ? await runner(explicitRuntime, [
       "--vanilla", "-e", validationCode,
-      resolve(staging, "_targets.R"), ...dependencies,
+      resolve(staging, "_targets.R"), runtimeReceipt, ...dependencies,
     ], { cwd: staging, timeout: 180_000 })
     : await runner(nix, [
       "--extra-experimental-features", "nix-command flakes",
       "develop", ...localNixpkgsOverride(), `path:${staging}`,
       "--command", "Rscript", "--vanilla", "-e", validationCode,
-      resolve(staging, "_targets.R"), ...dependencies,
+      resolve(staging, "_targets.R"), runtimeReceipt, ...dependencies,
     ], { cwd: staging, timeout: 180_000 });
   if (validation.code !== 0) {
+    await rm(runtimeReceipt, { force: true });
     throw new RecoverableError("ENVIRONMENT_VALIDATION_FAILED", "Candidate R environment or generated target package list failed validation", {
       message: (validation.stderr || validation.stdout).slice(0, 2000),
     });
   }
-  if (explicitRuntime) return explicitRuntime;
-  const runtimeMatch = validation.stdout.match(/^PI_R_RUNTIME:(\/.+)$/m);
-  const path = runtimeMatch?.[1]?.trim();
-  if (!path?.startsWith("/")) {
-    throw new RecoverableError("ENVIRONMENT_VALIDATION_FAILED", "Candidate environment did not report an absolute Rscript runtime", {
+  if (explicitRuntime) {
+    await rm(runtimeReceipt, { force: true });
+    return explicitRuntime;
+  }
+  const path = (await readFile(runtimeReceipt, "utf8").catch(() => "")).trim();
+  await rm(runtimeReceipt, { force: true });
+  const runtimeExists = await access(path).then(() => true, () => false);
+  if (!runtimeExists || !/^\/nix\/store\/[a-z0-9]{32}-[^/]+\/bin\/Rscript$/.test(path)) {
+    throw new RecoverableError("ENVIRONMENT_VALIDATION_FAILED", "Candidate environment did not report an immutable Rscript runtime", {
       message: (validation.stderr || validation.stdout).slice(0, 2000),
     });
   }

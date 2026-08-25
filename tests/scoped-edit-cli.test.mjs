@@ -176,60 +176,6 @@ test("the packaged CLI ignores inherited internal Tree-sitter overrides", async 
   assert.equal(JSON.parse(result.stdout).ok, true);
 });
 
-test("Tree-sitter CLI incompatibility is non-retryable and not reported as R syntax", async () => {
-  const path = await tempCopy();
-  const request = await requestFile({
-    path,
-    function: "write_result",
-    operation: { kind: "replace", body: "{\ninvisible(output_path)\n}" },
-  });
-  const directory = await mkdtemp(join(tmpdir(), "pi-r-incompatible-tree-sitter-"));
-  const incompatible = join(directory, "tree-sitter");
-  await writeFile(incompatible, "#!/bin/sh\necho \"error: unexpected argument '--lib-path' found\" >&2\nexit 2\n");
-  await chmod(incompatible, 0o755);
-
-  const result = await run(["r-functions", "edit", request], { PI_R_TEST_TREE_SITTER: incompatible });
-  assert.equal(result.code, 1);
-  assert.deepEqual(JSON.parse(result.stdout).error, {
-    code: "RUNTIME_INCOMPATIBLE",
-    message: "Tree-sitter CLI is incompatible with the packaged R parser",
-    recoverable: true,
-    retryable: false,
-    agentAction: "Do not change the R candidate; restart with one coherent pi-r runtime",
-    details: {
-      validator: "tree-sitter",
-      phase: "parse",
-      diagnostic: "error: unexpected argument '--lib-path' found",
-    },
-  });
-});
-
-test("a fresh base-R parse is required after Tree-sitter validation", async () => {
-  const path = await tempCopy();
-  const original = await readFile(path, "utf8");
-  const request = await requestFile({
-    path,
-    function: "write_result",
-    operation: { kind: "replace", body: "{\ninvisible(output_path)\n}" },
-  });
-  const directory = await mkdtemp(join(tmpdir(), "pi-r-failing-r-"));
-  const failingR = join(directory, "Rscript");
-  await writeFile(failingR, "#!/bin/sh\nexit 1\n");
-  await chmod(failingR, 0o755);
-
-  const result = await run(["r-functions", "edit", request], {
-    PI_R_TEST_BASE_RSCRIPT: failingR,
-  });
-  assert.equal(result.code, 1);
-  assert.deepEqual(JSON.parse(result.stdout).error, {
-    code: "INVALID_R_SYNTAX",
-    message: "Candidate failed a fresh base-R parse",
-    recoverable: true,
-    details: { validator: "base-r" },
-  });
-  assert.equal(await readFile(path, "utf8"), original);
-});
-
 test("patches cannot target text outside the selected function body", async () => {
   const path = await tempCopy();
   const request = await requestFile({

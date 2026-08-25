@@ -2117,6 +2117,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
         } catch (error) {
           if (state?.pendingApproval === "contract-lock") state = { ...state, pendingApproval: "none" };
           if (state) showHud(context, state);
+          else {
+            context.ui.setWidget?.("pi-r-hud", undefined);
+            context.ui.setStatus?.("pi-r", undefined);
+          }
           context.ui.notify(`pi-r lock failed: ${actionableToolError(error).message}`, "error");
         }
         return;
