@@ -114,7 +114,7 @@ async function tableArtifactProject() {
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
     version: 2,
-    runtimeVersion: "0.17.0",
+    runtimeVersion: "0.18.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -276,7 +276,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     { block: true, reason: "pi-r read path is outside approved read-only roots" },
   );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.17\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.18\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -1432,7 +1432,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.17\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.18\.0.*fresh Pi session/i);
 
   await git(root, "switch", "-qc", "other-branch");
   const mismatched = harness(entries);

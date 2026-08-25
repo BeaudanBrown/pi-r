@@ -13,7 +13,7 @@ export { inspectRFile } from "./r-edit/tree-sitter.js";
 export { validateContractEnvironment } from "./workbench/environment-governance.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
-export const VERSION = "0.17.0";
+export const VERSION = "0.18.0";
 
 export interface ResourcePaths {
   resources: string;
