@@ -774,9 +774,17 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
     edit.execute("invalid-shape", {
       function: "load_input",
       expectedSourceHash: inspected.details.sourceHash,
-      statements: "load_input <- function(path) { path }",
+      statements: "# repeated outer declaration\nload_input <- function(path) { path }",
     }, undefined, undefined, ctx),
     /INVALID_EDIT_SHAPE.*omit the function declaration and outer braces/,
+  );
+  await assert.rejects(
+    edit.execute("invalid-braces", {
+      function: "load_input",
+      expectedSourceHash: inspected.details.sourceHash,
+      statements: "# outer block\n{ path }",
+    }, undefined, undefined, ctx),
+    /INVALID_EDIT_SHAPE.*outer braces/,
   );
   await edit.execute("edit", {
     function: "load_input",

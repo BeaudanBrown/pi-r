@@ -1139,10 +1139,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const selectedName = typeof input.function === "string"
       ? input.function.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
       : "";
+    const significantStart = statements.replace(/^(?:(?:[ \t]*#.*)?\r?\n)*/, "").trimStart();
     const repeatsOuterDeclaration = selectedName
-      ? new RegExp(`^${selectedName}\\s*<-\\s*function\\s*\\(`).test(statements)
+      ? new RegExp(`^${selectedName}\\s*<-\\s*function\\s*\\(`).test(significantStart)
       : false;
-    if (repeatsOuterDeclaration || statements.startsWith("{")) {
+    if (repeatsOuterDeclaration || significantStart.startsWith("{")) {
       throw new RecoverableError(
         "INVALID_EDIT_SHAPE",
         "statements must omit the function declaration and outer braces",
