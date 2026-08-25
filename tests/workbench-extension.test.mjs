@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { link, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -449,7 +449,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -548,6 +548,69 @@ test("governed dependency proposals validate before one approved environment com
   await evaluate.execute("retain-until-approval", { code: "temporary_before_environment <- 1L", targets: [] }, undefined, undefined, ctx);
   const initialHead = await git(root, "rev-parse", "HEAD");
   const initialContract = await readFile(join(root, "pi-r.yml"), "utf8");
+
+  const fakeScoutDirectory = await mkdtemp(join(tmpdir(), "pi-r-fake-scout-"));
+  const fakeScout = join(fakeScoutDirectory, "scout.mjs");
+  await writeFile(fakeScout, `#!/usr/bin/env node
+import { readdirSync } from "node:fs";
+const args = process.argv.slice(2);
+const required = ["--mode", "json", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-builtin-tools"];
+if (required.some((flag) => !args.includes(flag)) || readdirSync(".").length !== 0) { console.error(JSON.stringify({ args, cwd: process.cwd(), files: readdirSync(".") })); process.exit(17); }
+const prompt = args.at(-1);
+const request = JSON.parse(prompt.slice(prompt.indexOf("\\n") + 1));
+if (Object.keys(request).sort().join(",") !== "candidateHints,constraints,requirement,technologyPolicy" || !request.technologyPolicy.packages.some((entry) => entry.package === "dplyr" && entry.status === "prohibited")) { console.error(JSON.stringify(request)); process.exit(18); }
+const evidence = (name) => [{ source: "official-registry", url: "https://cran.r-project.org/package=" + name, title: "CRAN " + name, claim: "Registry metadata for " + name }];
+const report = {
+  candidates: [
+    { identifier: "yaml", summary: "Parse a portable configuration document", evidence: evidence("yaml"), compatibility: ["R on Linux"], unresolvedQuestions: ["Confirm table conversion semantics"] },
+    { identifier: "dplyr", summary: "Alternative table grammar", evidence: evidence("dplyr"), compatibility: ["R on Linux"], unresolvedQuestions: [] },
+    { identifier: "data.tabel", summary: "Possible spelling supplied by research", evidence: evidence("data.table"), compatibility: [], unresolvedQuestions: ["Confirm canonical identifier"] }
+  ],
+  unresolvedQuestions: ["Which configuration shape is required?"]
+};
+console.log(JSON.stringify({ type: "tool_result_end", message: { toolName: "scout_submit", details: { kind: "pi-r-dependency-scout-v1", report } } }));
+`);
+  await chmod(fakeScout, 0o700);
+  const previousScout = process.env.PI_R_SCOUT_PI;
+  const previousScoutEntry = process.env.PI_R_SCOUT_PI_ENTRY;
+  process.env.PI_R_SCOUT_PI = process.execPath;
+  process.env.PI_R_SCOUT_PI_ENTRY = fakeScout;
+  t.after(async () => {
+    if (previousScout === undefined) delete process.env.PI_R_SCOUT_PI;
+    else process.env.PI_R_SCOUT_PI = previousScout;
+    if (previousScoutEntry === undefined) delete process.env.PI_R_SCOUT_PI_ENTRY;
+    else process.env.PI_R_SCOUT_PI_ENTRY = previousScoutEntry;
+    await rm(fakeScoutDirectory, { recursive: true, force: true });
+  });
+  const scout = h.tools.find((tool) => tool.name === "r_dependency_scout");
+  assert.ok(scout, "Implementation Mode must expose bounded dependency research");
+  const researched = await scout.execute("scout", {
+    requirement: "Parse a small portable configuration document into tabular settings",
+    domain: "tabular",
+    ecosystem: "R",
+    platforms: ["x86_64-linux"],
+    candidateHints: ["yaml"],
+  }, undefined, undefined, ctx);
+  assert.equal(researched.details.policyVersion, "pi-r-technology-v1");
+  assert.equal(researched.details.candidates.find((candidate) => candidate.identifier === "yaml").selectable, true);
+  assert.equal(researched.details.candidates.find((candidate) => candidate.identifier === "dplyr").policy.status, "prohibited");
+  assert.equal(researched.details.candidates.find((candidate) => candidate.identifier === "dplyr").selectable, false);
+  const typoCandidates = researched.details.candidates.find((candidate) => candidate.identifier === "data.tabel").resolution.candidates;
+  assert.equal(typoCandidates[0], "data.table");
+  assert.ok(typoCandidates.length <= 5);
+  assert.match(researched.content[0].text, /research-only[\s\S]*r_dependency_propose/);
+  assert.doesNotMatch(researched.content[0].text, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
+  assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
+  await assert.rejects(
+    scout.execute("unsafe-scout", {
+      requirement: "Inspect /home/operator/private.csv to discover a parsing package",
+      domain: "tabular",
+      ecosystem: "R",
+      platforms: ["x86_64-linux"],
+    }, undefined, undefined, ctx),
+    /UNSAFE_SCOUT_REQUIREMENT/,
+  );
 
   await assert.rejects(
     dependency.execute("unknown", {
@@ -920,7 +983,7 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_worker_status", "r_worker_reset", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);

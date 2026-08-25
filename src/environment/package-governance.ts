@@ -15,6 +15,17 @@ const MAX_CANDIDATES = 5;
 export type PackagePolicyStatus = "required" | "preferred" | "allowed" | "prohibited" | "unregistered";
 export type ApprovalScope = "project" | "shared";
 
+export interface PolicyDomainSnapshot {
+  version: string;
+  domain: string;
+  packages: Array<{
+    package: string;
+    status: Exclude<PackagePolicyStatus, "unregistered">;
+    rationale: string;
+    alternatives: string[];
+  }>;
+}
+
 export interface SharedPolicyUpdate {
   path: string;
   previous: string | undefined;
@@ -159,6 +170,21 @@ export function declaredPackagePolicy(nameInput: string): PackagePolicyDecision 
 
 export function technologyPolicyVersion(): string {
   return technologyPolicy.version;
+}
+
+export function policyForDomain(domainInput: string): PolicyDomainSnapshot {
+  const domain = domainInput.trim();
+  if (!domain || domain.length > 100) throw new RecoverableError("INVALID_PACKAGE_DOMAIN", "Package problem domain must contain between 1 and 100 characters");
+  const packages = Object.entries(policyEntries())
+    .filter(([, entry]) => entry.domains.includes(domain) || entry.status === "required" || entry.status === "prohibited")
+    .map(([name, entry]) => ({
+      package: name,
+      status: entry.status,
+      rationale: entry.rationale,
+      alternatives: [...entry.alternatives],
+    }))
+    .sort((left, right) => left.package.localeCompare(right.package));
+  return { version: technologyPolicy.version, domain, packages };
 }
 
 function nixString(value: string): string {

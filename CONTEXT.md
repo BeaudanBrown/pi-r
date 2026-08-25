@@ -92,6 +92,10 @@ _Avoid_: Target metadata, durable state
 The versioned shared classification of required, preferred, allowed, and prohibited R packages by problem domain.
 _Avoid_: Package list, recommendations
 
+**Dependency Scout**:
+A separate ephemeral research-only Pi process receiving one sanitized requirement, fixed constraints, and relevant Technology Policy while exposing only bounded primary-source HTTP retrieval and structured candidate submission.
+_Avoid_: Sub-agent, package resolver, installer
+
 **Environment Candidate**:
 One ignored package-change transaction whose policy decision, pinned-Nixpkgs resolution, generated files, package loads, and immutable R runtime have been validated without changing the active environment.
 _Avoid_: Draft flake, pending install

@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.12.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.13.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -21,6 +21,11 @@
               --platform=node \
               --format=esm \
               --outfile=$out/share/pi-r/extensions/pi-r.ts
+            esbuild ${self}/extensions/pi-r-dependency-scout.ts \
+              --bundle \
+              --platform=node \
+              --format=esm \
+              --outfile=$out/share/pi-r/extensions/pi-r-dependency-scout.ts
             cp ${./R/pi_r_runtime.R} $out/share/pi-r/R/pi_r_runtime.R
             cp ${./R/read_contract.R} $out/share/pi-r/R/read_contract.R
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
@@ -38,7 +43,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.12.0";
+            version = "0.13.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -80,6 +85,7 @@
             passthru.resourcePaths = {
               resources = "${piResources}/share/pi-r";
               extension = "${piResources}/share/pi-r/extensions/pi-r.ts";
+              scoutExtension = "${piResources}/share/pi-r/extensions/pi-r-dependency-scout.ts";
               rHelper = "${piResources}/share/pi-r/R/pi_r_runtime.R";
             };
 
@@ -105,7 +111,7 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.12.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.13.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"
@@ -130,10 +136,13 @@
               node --test ${./tests/library-smoke.test.mjs}
             PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
               node --test ${./tests/extension-smoke.test.mjs}
+            PI_R_SCOUT_EXTENSION=${resources}/share/pi-r/extensions/pi-r-dependency-scout.ts \
+              node --test ${./tests/dependency-scout-extension.test.mjs}
             PI_R_CLI=${piR}/bin/pi-r \
               PI_R_NIXPKGS_PATH=${pkgs.path} \
               PI_R_SHARED_POLICY_PATH="$TMPDIR/pi-r-shared-technology-policy.json" \
               PI_R_COMPILED_EXTENSION="$TMPDIR/extension/pi-r.mjs" \
+              PI_R_SCOUT_EXTENSION=${resources}/share/pi-r/extensions/pi-r-dependency-scout.ts \
               PI_R_CONTRACT_FIXTURE=${./tests/fixtures/project-contract.yml} \
               PI_R_TREE_SITTER=${pkgs.tree-sitter}/bin/tree-sitter \
               PI_R_TREE_SITTER_R=${pkgs.tree-sitter-grammars.tree-sitter-r}/parser \

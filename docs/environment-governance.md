@@ -1,6 +1,6 @@
 # Governed R package environments
 
-Pi-r treats package selection as a reviewed environment mutation rather than source editing or runtime installation. Project Contract dependencies resolve only from the contract's pinned Nixpkgs `rPackages`; CRAN/GitHub installation, custom derivations, `renv`, and `install.packages()` remain unavailable.
+Pi-r treats package selection as a reviewed environment mutation rather than source editing or runtime installation. Project Contract dependencies resolve only from the contract's pinned Nixpkgs `rPackages`; CRAN/GitHub installation, custom derivations, `renv`, and `install.packages()` remain unavailable. When package identity is genuinely ambiguous, the optional [bounded dependency research scout](dependency-scout.md) may collect primary evidence without gaining any resolution, mutation, or approval authority.
 
 ## Technology policy
 

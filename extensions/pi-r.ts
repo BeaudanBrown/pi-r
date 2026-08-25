@@ -1,5 +1,6 @@
 import { access, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
 import { validateContract } from "../src/contract/contract.js";
 import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
@@ -20,6 +21,7 @@ import {
 } from "../src/workbench/environment-governance.js";
 import { declaredPackagePolicy, prepareSharedPolicyUpdate } from "../src/environment/package-governance.js";
 import { prepareDeliverablePublication, type DeliverablePublication } from "../src/workbench/deliverable-publisher.js";
+import { scoutDependencies, type DependencyScoutRequest } from "../src/workbench/dependency-scout.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
@@ -28,6 +30,7 @@ const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as cons
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const ARTIFACT_TOOL = "r_artifact_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
+const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-live-state";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
@@ -48,6 +51,18 @@ const ARTIFACT_INSPECT_SCHEMA = {
   properties: {
     target: { type: "string", pattern: "^(?:[A-Za-z]|\\.(?!\\d))[A-Za-z0-9._]*$" },
     facets: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["structure", "summary"] } },
+  },
+} as const;
+const DEPENDENCY_SCOUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["requirement", "domain", "ecosystem", "platforms"],
+  properties: {
+    requirement: { type: "string", minLength: 10, maxLength: 1000 },
+    domain: { type: "string", minLength: 1, maxLength: 100, pattern: "^[A-Za-z][A-Za-z0-9 -]{0,99}$" },
+    ecosystem: { const: "R" },
+    platforms: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["x86_64-linux", "aarch64-linux"] } },
+    candidateHints: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9.]{0,99}$" } },
   },
 } as const;
 const DEPENDENCY_PROPOSAL_SCHEMA = {
@@ -179,10 +194,24 @@ interface ExtensionAPI {
   }): void;
   on(name: string, handler: (event: any, context: CommandContext) => unknown): void;
   appendEntry(customType: string, data: unknown): void;
-  exec(command: string, args: string[], options?: { cwd?: string; timeout?: number }): Promise<ExecResult>;
+  exec(command: string, args: string[], options?: { cwd?: string; timeout?: number; signal?: AbortSignal }): Promise<ExecResult>;
   getAllTools(): Array<{ name: string; sourceInfo?: { source?: string } }>;
   getActiveTools(): string[];
   setActiveTools(names: string[]): void;
+}
+
+function scoutPiInvocation(): { command: string; arguments: string[] } {
+  if (process.env.PI_R_SCOUT_PI) {
+    return {
+      command: process.env.PI_R_SCOUT_PI,
+      arguments: process.env.PI_R_SCOUT_PI_ENTRY ? [process.env.PI_R_SCOUT_PI_ENTRY] : [],
+    };
+  }
+  const executable = basename(process.execPath).toLowerCase();
+  if (/^(?:node|bun)(?:\.exe)?$/.test(executable) && process.argv[1]) {
+    return { command: process.execPath, arguments: [process.argv[1]] };
+  }
+  return { command: process.execPath, arguments: [] };
 }
 
 function words(input: string): string[] {
@@ -308,12 +337,14 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let targetRegistered = false;
   let artifactRegistered = false;
   let environmentRegistered = false;
+  let scoutRegistered = false;
   let worker: SandboxedRWorker | undefined;
   let projectRscript: string | undefined;
   let proposalQueue: Promise<void> = Promise.resolve();
   let editQueue: Promise<void> = Promise.resolve();
   let workerQueue: Promise<void> = Promise.resolve();
   let environmentQueue: Promise<void> = Promise.resolve();
+  let scoutQueue: Promise<void> = Promise.resolve();
   let publishQueue: Promise<void> = Promise.resolve();
   let liveObjects: WorkerObject[] = [];
   let liveTransientStateLost = false;
@@ -394,7 +425,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const targetTools = targetRegistered ? [...TARGET_TOOLS] : [];
     const artifactTools = artifactRegistered ? [ARTIFACT_TOOL] : [];
     const environmentTools = environmentRegistered ? [ENVIRONMENT_TOOL] : [];
-    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools, ...environmentTools];
+    const scoutTools = scoutRegistered ? [SCOUT_TOOL] : [];
+    if (phase === "implementation" && editRegistered) return [...safeReadTools(), INSPECT_TOOL, EDIT_TOOL, ...workerTools, ...targetTools, ...artifactTools, ...environmentTools, ...scoutTools];
     return safeReadTools();
   }
 
@@ -783,6 +815,49 @@ export default function piRExtension(pi: ExtensionAPI): void {
             approval: "Run /r environment to review and approve this candidate",
           };
           return { content: [{ type: "text", text: boundedJson(summary) }], details: candidate };
+        } catch (error) {
+          throw actionableToolError(error);
+        }
+      },
+    });
+  }
+
+  function registerScoutTool(): void {
+    if (scoutRegistered) return;
+    scoutRegistered = true;
+    pi.registerTool({
+      name: SCOUT_TOOL,
+      label: "Research ambiguous R dependencies",
+      description: "Delegate one sanitized R dependency requirement to an isolated online scout, then annotate its bounded evidence-backed candidates with local policy and pinned-Nixpkgs resolution. The scout cannot select, mutate, approve, install, or activate.",
+      promptSnippet: "Use only for ambiguous dependency discovery; pass no workspace content, then propose any selected resolved candidate separately",
+      parameters: DEPENDENCY_SCOUT_SCHEMA,
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
+        const operation = scoutQueue.then(async () => {
+          await assertWorkerProvenance(context);
+          if (!state || state.phase !== "implementation") {
+            throw new RecoverableError("INVALID_PHASE", "Dependency research requires Implementation Mode with a pinned Project Contract");
+          }
+          const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+          const invocation = scoutPiInvocation();
+          const extension = process.env.PI_R_SCOUT_EXTENSION ?? resolve(dirname(fileURLToPath(import.meta.url)), "pi-r-dependency-scout.ts");
+          return scoutDependencies(
+            params as DependencyScoutRequest,
+            contract.project.nixpkgs,
+            state.projectRoot,
+            (command, args, options) => pi.exec(command, args, options),
+            { pi: invocation.command, piArguments: invocation.arguments, extension, signal },
+          );
+        });
+        scoutQueue = operation.then(() => undefined, () => undefined);
+        try {
+          const report = await operation;
+          const summary = {
+            ...report,
+            authority: "research-only",
+            nextStep: "Choose only a selectable candidate and call r_dependency_propose; deterministic resolution and user approval remain separate",
+            trackedSourceChanged: false,
+          };
+          return { content: [{ type: "text", text: boundedJson(summary) }], details: report };
         } catch (error) {
           throw actionableToolError(error);
         }
@@ -1321,6 +1396,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     registerTargetTools();
     registerArtifactTool();
     registerEnvironmentTool();
+    registerScoutTool();
     enterPhase(implementation);
     updateLiveWorker([], liveTransientStateLost, "contract-locked");
     pi.appendEntry(STATE_ENTRY, implementation);
@@ -1344,6 +1420,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         registerTargetTools();
         registerArtifactTool();
         registerEnvironmentTool();
+        registerScoutTool();
       }
       updateLiveWorker([], false, "session-resumed");
       enterPhase({ ...restored, workerState: "stopped" });
@@ -1416,7 +1493,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Propose package changes through r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
     const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
