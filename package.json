@@ -1,6 +1,6 @@
 {
   "name": "pi-r",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "Constrained, phase-gated R and targets workspace for Pi coding agents",
   "type": "module",

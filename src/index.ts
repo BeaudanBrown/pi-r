@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 export { readContract, summarizeContract, validateContract } from "./contract/contract.js";
 export { checkScaffold, generateScaffold, renderScaffold } from "./contract/scaffold.js";
-export type { ProjectContract, ContractSummary } from "./contract/types.js";
+export type { ProjectContract, ContractSummary, VersionedDeliverable } from "./contract/types.js";
 export { classifyPackage, resolveContractPackages, resolvePackages, technologyPolicyVersion } from "./environment/package-governance.js";
 export type { ApprovalScope, PackagePolicyDecision, PackagePolicyStatus, ResolvedPackage } from "./environment/package-governance.js";
 export { createEditCandidate } from "./r-edit/scoped-edit.js";
@@ -12,7 +12,7 @@ export type { StructuredError } from "./r-edit/errors.js";
 export { inspectRFile } from "./r-edit/tree-sitter.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
-export const VERSION = "0.11.0";
+export const VERSION = "0.12.0";
 
 export interface ResourcePaths {
   resources: string;

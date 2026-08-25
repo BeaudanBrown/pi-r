@@ -3,6 +3,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
 import { inspectRFile } from "../r-edit/tree-sitter.js";
+import { fileTargetOutputs } from "./deliverables.js";
 import type { ConstantValue, ProjectContract, TargetDefinition } from "./types.js";
 
 export type GeneratedFiles = ReadonlyMap<string, string>;
@@ -111,6 +112,23 @@ function flakeFile(contract: ProjectContract): string {
 `;
 }
 
+function gitignoreFile(contract: ProjectContract): string {
+  const versioned = new Set(contract.deliverables.map((deliverable) => deliverable.path));
+  const runtimeOutputs = contract.targets
+    .flatMap((target) => fileTargetOutputs(target, contract.constants))
+    .filter((path) => !versioned.has(path))
+    .sort();
+  return [
+    ".direnv/",
+    ".pi/tmp/",
+    ".RData",
+    ".Rhistory",
+    "_targets/",
+    ...runtimeOutputs.map((path) => `/${path}`),
+    "",
+  ].join("\n");
+}
+
 function lockFile(contract: ProjectContract): string {
   const pin = contract.project.nixpkgs;
   return `${JSON.stringify(
@@ -146,7 +164,7 @@ export function renderScaffold(contract: ProjectContract): GeneratedFiles {
   const canonicalContract = `${JSON.stringify(contract, null, 2)}\n`;
   const files = new Map<string, string>([
     [".envrc", "use flake\n"],
-    [".gitignore", ".direnv/\n.pi/tmp/\n.RData\n.Rhistory\n_targets/\n"],
+    [".gitignore", gitignoreFile(contract)],
     ["R/constants.R", constantsFile(contract)],
     ["_targets.R", targetsFile(contract)],
     ["flake.lock", lockFile(contract)],

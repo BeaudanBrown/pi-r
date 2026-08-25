@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,6 +27,7 @@ async function targetOperationsContract() {
   return {
     ...contract,
     dependencies: [],
+    deliverables: [{ target: "answer", path: "artifacts/answer.txt" }],
     constants: { seed: 41, output_path: "artifacts/answer.txt", source_path: "analysis.R" },
     functions: [
       { name: "write_answer", parameters: ["seed", "output_path"] },
@@ -683,7 +684,7 @@ test("implementation mode lists contracted targets with bounded freshness metada
 test("target execution requires explicit contracted names and stores complete local logs", { timeout: 90_000 }, async (t) => {
   const root = await repository();
   const h = harness();
-  const ctx = context(root, [], [true]);
+  const ctx = context(root, [], [true, false, true]);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
   const contract = await targetOperationsContract();
@@ -773,6 +774,20 @@ test("target execution requires explicit contracted names and stores complete lo
   assert.notEqual(invalidated.details.identity.metadataHash, inspected.details.identity.metadataHash);
   assert.equal(await git(root, "rev-parse", "HEAD"), revisedHead);
 
+  await writeFile(join(root, "artifacts/local-only.txt"), "do not publish\n");
+  await h.commands[0].options.handler("publish", ctx);
+  assert.equal(await git(root, "rev-parse", "HEAD"), revisedHead);
+  assert.match(ctx.notifications.at(-1)[0], /cancelled.*unchanged/i);
+  assert.match(ctx.confirmationRequests.at(-1)[1], /added artifacts\/answer\.txt[\s\S]*\+43/);
+
+  await h.commands[0].options.handler("publish", ctx);
+  const publicationHead = await git(root, "rev-parse", "HEAD");
+  assert.notEqual(publicationHead, revisedHead);
+  assert.equal(await git(root, "show", "--name-only", "--format=", "HEAD"), "artifacts/answer.txt");
+  assert.match(await git(root, "log", "-1", "--format=%B"), /Publish declared deliverables[\s\S]*Capability: r_deliverable_publish[\s\S]*Deliverables: artifacts\/answer\.txt/);
+  assert.equal(await readFile(join(root, "artifacts/local-only.txt"), "utf8"), "do not publish\n");
+  assert.match(await git(root, "status", "--porcelain"), /\?\? artifacts\/local-only\.txt/);
+
   const failed = await runTargets.execute("run-broken", { names: ["broken"], all: false }, undefined, undefined, ctx);
   assert.equal(failed.details.status, "failed");
   assert.equal(failed.details.error.code, "TARGET_RUN_FAILED");
@@ -794,6 +809,14 @@ test("target execution requires explicit contracted names and stores complete lo
   const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
     .execute("diagnose", { code: "readLines(answer)", targets: [] }, undefined, undefined, ctx);
   assert.equal(evaluated.details.value, "43");
+
+  await rm(join(root, "artifacts/answer.txt"));
+  await link(join(root, "analysis.R"), join(root, "artifacts/answer.txt"));
+  await assert.rejects(
+    runTargets.execute("hard-linked-output", { names: ["answer"], all: false }, undefined, undefined, ctx),
+    /INVALID_OUTPUT_PATH.*hard link|symbolic or hard link/,
+  );
+  assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 1\n");
 });
 
 test("table artifact inspection returns structure and summaries without rows and warns on kind mismatch", { timeout: 120_000 }, async (t) => {

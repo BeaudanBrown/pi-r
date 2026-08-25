@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
 
@@ -104,6 +104,10 @@ async function executeRunner(
   const writableFiles = options.writableFiles ?? [];
   for (const path of writableFiles) {
     if (!isAbsolute(path)) throw new RecoverableError("INVALID_OUTPUT_PATH", "Declared target output paths must be absolute");
+    const metadata = await lstat(path).catch(() => undefined);
+    if (metadata?.isSymbolicLink() || (metadata && metadata.nlink !== 1)) {
+      throw new RecoverableError("INVALID_OUTPUT_PATH", "Declared target outputs must not be symbolic or hard links");
+    }
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, "", { flag: "a" });
   }

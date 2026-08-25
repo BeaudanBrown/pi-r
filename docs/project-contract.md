@@ -11,8 +11,9 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 - Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
 - Target references must form an acyclic graph.
 - Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`, which current `targets` implements with the maintained `qs2` package; file artifacts generate `format = "file"`.
-- A controlled file target declares its exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects tracked paths and canonical path escapes.
+- A controlled file target declares one exact writable project-local output through a string constant bound to a `path`, `output_path`, or `file_path` parameter. Target execution rejects canonical path escapes and tracked paths except for the same target's explicitly versioned deliverable.
 - Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
+- Optional versioned `deliverables` bind a non-dynamic file target to its exact output path. Other file-target outputs are ignored exactly; see [Versioned deliverable publication](deliverable-publication.md).
 - Contract, template, policy, and Nixpkgs revisions are pinned.
 - Dependencies resolve only from pinned Nixpkgs. Optional `dependencyApprovals` entries record the domain, rationale, original policy status, and project/shared scope of reviewed choices; see [Governed R package environments](environment-governance.md).
 

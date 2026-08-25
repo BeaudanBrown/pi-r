@@ -55,6 +55,8 @@ A general target-backed inspector reports bounded table, object, and file struct
 
 Package additions and removals pass through versioned technology policy, exact pinned-Nixpkgs resolution, ignored candidate staging, and user-only transactional activation. Failed proposals preserve the active environment and worker; successful approval creates one provenance commit and explicitly resets Transient State while retaining the targets cache. See [Governed R package environments](docs/environment-governance.md).
 
+Generated outputs remain separate from Git by default. Contracts may name exact versioned file deliverables; target execution still never commits them, while user-only `/r publish` validates freshness and canonical paths, previews changes, and commits only the approved declarations. See [Versioned deliverable publication](docs/deliverable-publication.md).
+
 ## Scoped R function tracer
 
 Inspect top-level functions without changing a file:

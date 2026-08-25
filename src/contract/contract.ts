@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { RecoverableError } from "../r-edit/errors.js";
+import { fileTargetOutputs, validateDeliverablePath } from "./deliverables.js";
 import {
   ARTIFACT_KINDS,
   PATTERN_KINDS,
@@ -126,6 +127,7 @@ export function validateContract(input: unknown): ProjectContract {
       "project",
       "dependencies",
       "dependencyApprovals",
+      "deliverables",
       "constants",
       "functions",
       "targets",
@@ -261,6 +263,42 @@ export function validateContract(input: unknown): ProjectContract {
   }
   assertAcyclic(targets);
 
+  for (const target of targets.filter((candidate) => candidate.artifact === "file")) {
+    const outputs = fileTargetOutputs(target, constants);
+    if (outputs.length !== 1) invalid(`file target '${target.name}' must declare exactly one constant output path`);
+    try {
+      validateDeliverablePath(outputs[0], `file target '${target.name}' output`);
+    } catch (error) {
+      invalid(error instanceof Error ? error.message : `file target '${target.name}' output is invalid`);
+    }
+  }
+
+  const deliverablesInput = root.deliverables ?? [];
+  if (!Array.isArray(deliverablesInput)) invalid("deliverables must be an array");
+  if (deliverablesInput.length > 100) invalid("deliverables must contain at most 100 entries");
+  const deliverables = deliverablesInput.map((entry, index) => {
+    const path = `deliverables[${index}]`;
+    const value = object(entry, path);
+    exactKeys(value, ["target", "path"], path);
+    const targetName = rName(value.target, `${path}.target`);
+    let declaredPath: string;
+    try {
+      declaredPath = validateDeliverablePath(value.path, `${path}.path`);
+    } catch (error) {
+      return invalid(error instanceof Error ? error.message : `${path}.path is invalid`);
+    }
+    const target = targets.find((candidate) => candidate.name === targetName);
+    if (!target) invalid(`${path}.target must refer to a declared target`);
+    if (target.artifact !== "file") invalid(`${path}.target must be a file target`);
+    if (target.pattern) invalid(`${path}.target must not use dynamic branching`);
+    if (!fileTargetOutputs(target, constants).includes(declaredPath)) {
+      invalid(`${path}.path must equal the file target's declared output path`);
+    }
+    return { target: targetName, path: declaredPath };
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  if (new Set(deliverables.map((entry) => entry.path)).size !== deliverables.length) invalid("deliverable paths must be unique");
+  if (new Set(deliverables.map((entry) => entry.target)).size !== deliverables.length) invalid("deliverable targets must be unique");
+
   return {
     contractVersion: 1,
     templateVersion: "pi-r-template-v1",
@@ -277,6 +315,7 @@ export function validateContract(input: unknown): ProjectContract {
     },
     dependencies,
     dependencyApprovals,
+    deliverables,
     constants,
     functions,
     targets,
@@ -304,6 +343,7 @@ export function summarizeContract(contract: ProjectContract): ContractSummary {
     policyVersion: contract.policyVersion,
     project: contract.project.name,
     dependencies: contract.dependencies,
+    deliverables: contract.deliverables.map((deliverable) => deliverable.path),
     functions: contract.functions.map((fn) => fn.name),
     constants: Object.keys(contract.constants),
     targets: contract.targets.map((target) => target.name),

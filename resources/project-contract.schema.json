@@ -43,6 +43,24 @@
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
     },
+    "deliverables": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "path"],
+        "properties": {
+          "target": { "$ref": "#/$defs/rName" },
+          "path": {
+            "type": "string",
+            "maxLength": 500,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+          }
+        }
+      }
+    },
     "dependencyApprovals": {
       "type": "object",
       "propertyNames": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9.]{0,99}$" },

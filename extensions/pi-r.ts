@@ -1,8 +1,8 @@
-import { access, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import contractSchema from "../resources/project-contract.schema.json" with { type: "json" };
 import { validateContract } from "../src/contract/contract.js";
-import { renderScaffold } from "../src/contract/scaffold.js";
+import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
 import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
@@ -19,6 +19,7 @@ import {
   type EnvironmentCandidate,
 } from "../src/workbench/environment-governance.js";
 import { declaredPackagePolicy, prepareSharedPolicyUpdate } from "../src/environment/package-governance.js";
+import { prepareDeliverablePublication, type DeliverablePublication } from "../src/workbench/deliverable-publisher.js";
 
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
@@ -128,7 +129,7 @@ interface WorkbenchState {
   contractState: "missing" | "present";
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
-  pendingApproval: "none" | "contract-lock" | "environment-change";
+  pendingApproval: "none" | "contract-lock" | "environment-change" | "deliverable-publish";
   workerState: WorkerState;
   readOnlyRoots: string[];
   allowedTools: string[];
@@ -208,7 +209,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
     (state.contractState === "missing" || state.contractState === "present") &&
     state.policyState === "pi-r-policy-v1" &&
     typeof state.editableScopeCount === "number" &&
-    (state.pendingApproval === "none" || state.pendingApproval === "contract-lock" || state.pendingApproval === "environment-change") &&
+    (state.pendingApproval === "none" || state.pendingApproval === "contract-lock" || state.pendingApproval === "environment-change" || state.pendingApproval === "deliverable-publish") &&
     (state.workerState === "stopped" || state.workerState === "running" || state.workerState === "crashed") &&
     Array.isArray(state.readOnlyRoots) &&
     state.readOnlyRoots.every((root) => typeof root === "string" && isAbsolute(root)) &&
@@ -258,6 +259,7 @@ function contractSummary(contract: ProjectContract): string {
     .map(([name, value]) => `- ${name} = ${JSON.stringify(value)}`)
     .join("\n") || "- none";
   const dependencies = contract.dependencies.map((name) => `- ${name}`).join("\n") || "- none";
+  const deliverables = contract.deliverables.map((entry) => `- ${entry.target}: ${entry.path}`).join("\n") || "- none";
   const graph = contract.targets
     .map((target) => {
       const inputs = Object.values(target.arguments).map((argument) =>
@@ -267,7 +269,7 @@ function contractSummary(contract: ProjectContract): string {
       return `- ${target.name} <- [${inputs.join(", ")}] => ${target.function} (${target.artifact})${pattern}`;
     })
     .join("\n");
-  return `Functions and signatures\n${functions}\n\nConstants\n${constants}\n\nDependencies\n${dependencies}\n\nTarget graph\n${graph}`;
+  return `Functions and signatures\n${functions}\n\nConstants\n${constants}\n\nDependencies\n${dependencies}\n\nVersioned deliverables\n${deliverables}\n\nTarget graph\n${graph}`;
 }
 
 async function canonicalDestination(path: string): Promise<string> {
@@ -312,6 +314,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let editQueue: Promise<void> = Promise.resolve();
   let workerQueue: Promise<void> = Promise.resolve();
   let environmentQueue: Promise<void> = Promise.resolve();
+  let publishQueue: Promise<void> = Promise.resolve();
   let liveObjects: WorkerObject[] = [];
   let liveTransientStateLost = false;
   let liveTransition = "inactive";
@@ -461,8 +464,19 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (!state) throw new RecoverableError("INVALID_PHASE", "R exploration requires an active Workbench Session");
     const mismatch = await verifyState(state, context);
     if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
-    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
-    if (dirty.stdout.trim()) throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
+    const staged = await git(["diff", "--cached", "--name-only", "-z"], state.projectRoot);
+    if (staged.stdout) throw new RecoverableError("STALE_CONTENT", "The Git index changed outside scoped capabilities");
+    const changed = (await git(["diff", "--name-only", "-z"], state.projectRoot)).stdout.split("\0").filter(Boolean);
+    let allowedOutputs = new Set<string>();
+    if (state.phase === "implementation") {
+      const lockedContract = await git(["show", "HEAD:pi-r.yml"], state.projectRoot);
+      const contract = validateContract(JSON.parse(lockedContract.stdout));
+      allowedOutputs = new Set(contract.deliverables.map((deliverable) => deliverable.path));
+    }
+    const sourceChanges = changed.filter((path) => !allowedOutputs.has(path));
+    if (sourceChanges.length) {
+      throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities", { paths: sourceChanges.sort() });
+    }
   }
 
   function registerWorkerTools(): void {
@@ -620,13 +634,20 @@ export default function piRExtension(pi: ExtensionAPI): void {
                 throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} requires a relative declared output path`);
               }
               const requestedOutput = resolve(state.projectRoot, value);
+              const outputMetadata = await lstat(requestedOutput).catch(() => undefined);
+              if (outputMetadata?.isSymbolicLink() || (outputMetadata && outputMetadata.nlink !== 1)) {
+                throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} output must not be a symbolic or hard link`);
+              }
               const output = await realpath(requestedOutput).catch(() => canonicalDestination(requestedOutput));
               const rel = relative(state.projectRoot, output);
               if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || [".git", ".pi", "_targets"].includes(rel.split(sep)[0])) {
                 throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} output escapes permitted runtime paths`);
               }
               const tracked = await git(["ls-files", "--error-unmatch", "--", rel], state.projectRoot, true);
-              if (tracked.code === 0) throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} cannot write tracked source: ${rel}`);
+              const declaredDeliverable = contract.deliverables.some((deliverable) => deliverable.target === target.name && deliverable.path === rel);
+              if (tracked.code === 0 && !declaredDeliverable) {
+                throw new RecoverableError("INVALID_OUTPUT_PATH", `File target ${target.name} cannot write tracked source: ${rel}`);
+              }
               writableFiles.push(output);
             }
           }
@@ -1027,6 +1048,94 @@ export default function piRExtension(pi: ExtensionAPI): void {
     context.ui.notify(`pi-r workbench started: ${hud(next)}`, "info");
   }
 
+  async function publicationCandidate(contract: ProjectContract): Promise<DeliverablePublication> {
+    if (!state) throw new RecoverableError("INVALID_PHASE", "Deliverable publication requires an active Workbench Session");
+    const runtime = await workerRuntime("project");
+    const targets = contract.deliverables.map((deliverable) => deliverable.target);
+    const freshness = await listTargets(targets, {
+      projectRoot: state.projectRoot,
+      readOnlyRoots: state.readOnlyRoots,
+      rscript: runtime,
+      runnerScript: process.env.PI_R_TARGET_RUNNER_SCRIPT ?? "",
+      bwrap: process.env.PI_R_BWRAP,
+    });
+    return prepareDeliverablePublication(
+      state.projectRoot,
+      contract,
+      freshness.targets.map((target) => ({ target: target.name, freshness: target.freshness })),
+      (command, args, options) => pi.exec(command, args, options),
+    );
+  }
+
+  async function publishDeliverables(context: CommandContext): Promise<void> {
+    if (!state || state.phase !== "implementation") {
+      throw new RecoverableError("INVALID_PHASE", "Deliverable publication requires Implementation Mode");
+    }
+    const mismatch = await verifyState(state, context);
+    if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
+    const contract = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+    await checkScaffold(contract, state.projectRoot);
+    const candidate = await publicationCandidate(contract);
+    state = { ...state, pendingApproval: "deliverable-publish" };
+    showHud(context, state);
+    const summary = candidate.changes
+      .map((change) => `${change.status} ${change.path} (${change.bytes} bytes, sha256:${change.sha256})`)
+      .join("\n");
+    const confirmed = await context.ui.confirm?.(
+      "Publish declared deliverables?",
+      `${summary}\n\n${candidate.preview}\n\nOnly these contract-declared paths will be staged. Approval creates one deliverable provenance commit.`,
+    ) ?? false;
+    if (!confirmed) {
+      state = { ...state, pendingApproval: "none" };
+      showHud(context, state);
+      context.ui.notify("Deliverable publication cancelled; outputs and Git were left unchanged", "info");
+      return;
+    }
+
+    let staged = false;
+    try {
+      const refreshed = await publicationCandidate(contract);
+      if (refreshed.head !== candidate.head || refreshed.digest !== candidate.digest) {
+        throw new RecoverableError("STALE_DELIVERABLE_PREVIEW", "Declared deliverables changed after the publication preview");
+      }
+      const paths = refreshed.changes.map((change) => change.path).sort();
+      await git(["add", "--", ...paths], state.projectRoot);
+      staged = true;
+      const stagedPaths = (await git(["diff", "--cached", "--name-only", "-z"], state.projectRoot)).stdout
+        .split("\0").filter(Boolean).sort();
+      if (JSON.stringify(stagedPaths) !== JSON.stringify(paths)) {
+        throw new RecoverableError("UNDECLARED_STAGED_OUTPUT", "Git index contains paths outside the approved deliverable set", { paths: stagedPaths });
+      }
+      for (const change of refreshed.changes) {
+        const stagedBlob = (await git(["rev-parse", `:${change.path}`], state.projectRoot)).stdout.trim();
+        if (stagedBlob !== change.gitBlob) {
+          throw new RecoverableError("STALE_DELIVERABLE_PREVIEW", `Deliverable changed while it was being staged: ${change.path}`);
+        }
+      }
+      const commitMessage = [
+        `Publish declared deliverables`,
+        "",
+        "Capability: r_deliverable_publish",
+        `Deliverables: ${paths.join(", ")}`,
+        `Publication-Digest: sha256:${refreshed.digest}`,
+      ].join("\n");
+      await git(["commit", "-m", commitMessage], state.projectRoot);
+      const head = (await git(["rev-parse", "HEAD"], state.projectRoot)).stdout.trim();
+      state = { ...state, head, pendingApproval: "none" };
+      liveTransition = "deliverables-published";
+      pi.appendEntry(STATE_ENTRY, state);
+      showHud(context, state);
+      context.ui.notify(`Published ${paths.length} declared deliverable(s) in ${shortHead(head)}`, "info");
+    } catch (error) {
+      if (staged && state) await git(["reset", "--quiet", "HEAD", "--", ...candidate.changes.map((change) => change.path)], state.projectRoot, true);
+      if (state?.pendingApproval === "deliverable-publish") {
+        state = { ...state, pendingApproval: "none" };
+        showHud(context, state);
+      }
+      throw error;
+    }
+  }
+
   async function activateEnvironmentCandidate(candidate: EnvironmentCandidate, context: CommandContext): Promise<void> {
     if (!state || state.phase !== "implementation") throw new RecoverableError("INVALID_PHASE", "Environment activation requires Implementation Mode");
     const currentHead = (await git(["rev-parse", "HEAD"], state.projectRoot)).stdout.trim();
@@ -1307,7 +1416,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const proposal = state.phase === "design"
       ? " Use r_contract_propose to create or revise the single Project Contract draft."
-      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Propose package changes through r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values.";
+      : " The Project Contract is locked; only Approved Function bodies may become editable through scoped tools. Propose package changes through r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
     const exploration = " Use evaluate_r for bounded temporary exploration; target objects must be requested explicitly by canonical name.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active. Use only the active compact tools within: ${roots}. Do not request shell or general mutation tools.${proposal}${exploration}`,
@@ -1330,6 +1439,20 @@ export default function piRExtension(pi: ExtensionAPI): void {
         }
         showHud(context, state);
         context.ui.notify(`${hud(state)}\n${await workerStatusText()}`, "info");
+        return;
+      }
+      if (subcommand === "publish") {
+        const operation = publishQueue.then(() => publishDeliverables(context));
+        publishQueue = operation.then(() => undefined, () => undefined);
+        try {
+          await operation;
+        } catch (error) {
+          if (state?.pendingApproval === "deliverable-publish") {
+            state = { ...state, pendingApproval: "none" };
+            showHud(context, state);
+          }
+          context.ui.notify(`pi-r publish failed: ${actionableToolError(error).message}`, "error");
+        }
         return;
       }
       if (subcommand === "environment") {
@@ -1389,7 +1512,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         return;
       }
       if (subcommand !== "start") {
-        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock | /r environment", "warning");
+        context.ui.notify("Usage: /r start [read-only-root ...] | /r status | /r lock | /r environment | /r publish", "warning");
         return;
       }
       try {

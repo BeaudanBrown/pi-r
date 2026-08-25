@@ -99,3 +99,11 @@ _Avoid_: Draft flake, pending install
 **Environment Activation**:
 The user-approved publication of an Environment Candidate in one Provenance Commit followed by a Persistent R Worker restart while preserving the targets cache.
 _Avoid_: Hot reload, package installation
+
+**Versioned Deliverable**:
+One exact Project Contract-declared file-target output eligible for explicit source-control publication while other generated outputs remain ignored.
+_Avoid_: Artifact, target output
+
+**Deliverable Publication**:
+The user-approved, stale-safe staging of only changed current Versioned Deliverables in one deterministic Provenance Commit. Target execution never performs publication.
+_Avoid_: Export, target run, automatic commit

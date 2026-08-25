@@ -53,6 +53,7 @@ test("a schema-validated contract exposes the complete semantic design", async (
     policyVersion: "pi-r-policy-v1",
     project: "confidential-analysis",
     dependencies: ["data.table"],
+    deliverables: [],
     functions: ["load_input", "make_config", "summarise_groups", "write_result"],
     constants: ["input_path", "output_path", "threshold"],
     targets: ["raw_data", "config", "summaries", "report"],
@@ -98,6 +99,8 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
   assert.doesNotMatch(firstSnapshot["flake.nix"], /rPackages\."qs"/);
   assert.match(firstSnapshot["flake.lock"], /b6018f87da91d19d0ab4cf979885689b469cdd41/);
   assert.equal(firstSnapshot[".envrc"], "use flake\n");
+  assert.match(firstSnapshot[".gitignore"], /^\/artifacts\/report\.qs$/m);
+  assert.doesNotMatch(firstSnapshot[".gitignore"], /^\*|^data\/$/m);
 
   await execFileAsync("nix-instantiate", ["--parse", join(first, "flake.nix")]);
   await execFileAsync("Rscript", [
@@ -106,6 +109,39 @@ test("generation creates the complete deterministic Nix/targets scaffold", async
     "parse(file = commandArgs(TRUE)[[1]])",
     join(first, "_targets.R"),
   ]);
+});
+
+test("declared deliverables remain versionable while exact undeclared file outputs are ignored", async () => {
+  const initial = await outputDirectory();
+  assert.equal((await run(["contract", "generate", contract, initial])).code, 0);
+  const definition = JSON.parse(await readFile(join(initial, "pi-r.yml"), "utf8"));
+  delete definition.targets.find((target) => target.name === "report").pattern;
+  definition.constants.scratch_path = "artifacts/local-scratch.qs";
+  definition.targets.push({
+    name: "scratch",
+    function: "write_result",
+    artifact: "file",
+    arguments: {
+      table: { target: "summaries" },
+      config: { target: "config" },
+      output_path: { constant: "scratch_path" },
+    },
+  });
+  definition.deliverables = [{ target: "report", path: "artifacts/report.qs" }];
+  const source = join(await mkdtemp(join(tmpdir(), "pi-r-deliverable-contract-")), "contract.json");
+  await writeFile(source, JSON.stringify(definition));
+  const output = await outputDirectory();
+  const generated = await run(["contract", "generate", source, output]);
+  assert.equal(generated.code, 0, generated.stderr);
+  const ignored = await readFile(join(output, ".gitignore"), "utf8");
+  assert.match(ignored, /^\/artifacts\/local-scratch\.qs$/m);
+  assert.doesNotMatch(ignored, /^\/artifacts\/report\.qs$/m);
+
+  definition.deliverables[0].path = "../report.qs";
+  await writeFile(source, JSON.stringify(definition));
+  const invalid = await run(["contract", "validate", source]);
+  assert.equal(invalid.code, 1);
+  assert.match(JSON.parse(invalid.stdout).error.message, /project-relative portable path|traversal/);
 });
 
 test("contract checking detects machine-owned drift but permits function body implementation", async () => {

@@ -28,6 +28,11 @@ export interface TargetDefinition {
   pattern?: { kind: PatternKind; over: string[] };
 }
 
+export interface VersionedDeliverable {
+  target: string;
+  path: string;
+}
+
 export interface DependencyApproval {
   scope: "project" | "shared";
   domain: string;
@@ -42,6 +47,7 @@ export interface ProjectContract {
   project: { name: string; nixpkgs: NixpkgsPin };
   dependencies: string[];
   dependencyApprovals: Record<string, DependencyApproval>;
+  deliverables: VersionedDeliverable[];
   constants: Record<string, ConstantValue>;
   functions: ApprovedFunction[];
   targets: TargetDefinition[];
@@ -53,6 +59,7 @@ export interface ContractSummary {
   policyVersion: string;
   project: string;
   dependencies: string[];
+  deliverables: string[];
   functions: string[];
   constants: string[];
   targets: string[];
