@@ -79,14 +79,14 @@ function stringArray(value: unknown): string[] {
 
 function objects(value: unknown): WorkerObject[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
+  return value.slice(0, 200).flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     const candidate = item as Partial<WorkerObject>;
-    if (typeof candidate.name !== "string" || typeof candidate.bytes !== "number") return [];
+    if (typeof candidate.name !== "string" || typeof candidate.bytes !== "number" || !Number.isFinite(candidate.bytes)) return [];
     return [{
-      name: candidate.name,
-      bytes: candidate.bytes,
-      class: stringArray(candidate.class),
+      name: candidate.name.slice(0, 200),
+      bytes: Math.max(0, Math.trunc(candidate.bytes)),
+      class: stringArray(candidate.class).slice(0, 8).map((name) => name.slice(0, 200)),
       origin: candidate.origin === "temporary" ? "temporary" : candidate.origin === "target" ? "target" : "global",
     }];
   });
@@ -163,9 +163,10 @@ export class SandboxedRWorker {
     };
   }
 
-  async invalidateTargets(): Promise<void> {
-    if (!this.#child || this.#state !== "running") return;
-    await this.#request({ operation: "invalidate_targets" });
+  async invalidateTargets(): Promise<WorkerObject[]> {
+    if (!this.#child || this.#state !== "running") return [];
+    const response = await this.#request({ operation: "invalidate_targets" });
+    return objects(response.objects);
   }
 
   async status(): Promise<{ state: WorkerState; environment?: WorkerEnvironment; objects: WorkerObject[]; transientStateLost: boolean }> {

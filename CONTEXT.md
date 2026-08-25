@@ -41,8 +41,8 @@ A canonical project or user-attached path under which Design Mode may read or se
 _Avoid_: Allowlist, mount
 
 **Current-State HUD**:
-The bounded status line showing phase, Git provenance, contract/policy state, editable scope count, approval state, and R worker state.
-_Avoid_: Dashboard, telemetry
+The bounded runtime-only agent context projection showing current phase, Git provenance, contract/policy and environment state, approval state, R worker state, and object inventory. It replaces itself before each model call and is distinct from the operator-facing TUI widget.
+_Avoid_: Dashboard, telemetry, status history
 
 **Contract Draft**:
 The single ignored, machine-managed, schema-valid Project Contract proposal revised during Design Mode.

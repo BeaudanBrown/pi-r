@@ -3,7 +3,7 @@
 A Workbench Session exposes three structured exploration tools in Design and Implementation Modes:
 
 - `evaluate_r` evaluates temporary code and names every target to load explicitly;
-- `r_worker_status` lists current object names, origins, classes, and approximate serialized sizes; and
+- `r_worker_status` explicitly lists current object names, origins, classes, and approximate serialized sizes; and
 - `r_worker_reset` discards all transient state and reports how many objects were lost.
 
 The worker starts lazily on the first evaluation. Assignments remain available across calls until reset, crash, contract lock, or session shutdown. Exploration never changes Git provenance or durable source.
@@ -28,9 +28,8 @@ Evaluation returns separate fields for:
 - a bounded preview;
 - warnings;
 - messages;
-- a recoverable structured R error; and
-- the bounded current object inventory.
+- a recoverable structured R error.
 
-Model-facing output is capped at approximately 8 KiB. Protocol frames, values, conditions, previews, and inventories have independent limits to prevent an accidental data dump from expanding model context.
+The extension retains the bounded inventory from each operation as runtime state and projects it through the non-persistent [Current-State HUD](workbench-session.md#current-state-hud) before every model call. Routine evaluation tool results do not repeat it. Model-facing evaluation output is capped at approximately 8 KiB, while the live-state projection is capped at 4 KiB and 50 displayed objects. Protocol frames, values, conditions, previews, and inventories have independent limits to prevent an accidental data dump from expanding model context.
 
 A worker crash fails the active request with `WORKER_CRASH` and explicitly reports transient-state loss. The next evaluation starts a clean worker and marks `transientStateLost`. Cancellation and timeout also stop the worker rather than leaving an uncontrolled evaluation running. Requests time out after 30 seconds; generated-environment resolution has a separate bounded startup timeout.

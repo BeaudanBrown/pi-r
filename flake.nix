@@ -12,7 +12,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          piResources = pkgs.runCommand "pi-r-resources-0.9.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.10.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources
@@ -37,7 +37,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.9.0";
+            version = "0.10.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -104,7 +104,7 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.9.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.10.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"

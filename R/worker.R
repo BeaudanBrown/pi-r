@@ -32,7 +32,12 @@ object_inventory <- function() {
     }
     environment <- if (origin == "temporary") .pi_r_session else .pi_r_globals
     value <- get(name, envir = environment, inherits = FALSE)
-    list(name = name, bytes = length(serialize(value, NULL)), class = class(value), origin = origin)
+    list(
+      name = substr(name, 1L, 200L),
+      bytes = length(serialize(value, NULL)),
+      class = substr(head(class(value), 8L), 1L, 200L),
+      origin = origin
+    )
   })
 }
 

@@ -259,6 +259,35 @@ test("design mode gates model tools to reads inside approved roots", async () =>
   assert.equal((await gate({ toolName: "write", input: { path: join(root, "x") } }, ctx)).block, true);
 });
 
+test("active workbench projects one replaceable live-state snapshot into agent context", async () => {
+  const root = await repository();
+  const h = harness();
+  const ctx = context(root);
+  const projectContext = h.handlers.get("context");
+
+  assert.equal(await projectContext({ messages: [{ role: "user", content: "inactive" }] }, ctx), undefined);
+  await h.commands[0].options.handler("start", ctx);
+
+  const original = [{ role: "user", content: "inspect state" }];
+  const first = await projectContext({ messages: original }, ctx);
+  assert.equal(first.messages.length, 2);
+  assert.deepEqual(first.messages[0], original[0]);
+  assert.equal(first.messages[1].role, "custom");
+  assert.equal(first.messages[1].customType, "pi-r-live-state");
+  assert.equal(first.messages[1].display, false);
+  const snapshot = JSON.parse(first.messages[1].content);
+  assert.equal(snapshot.phase, "design");
+  assert.equal(snapshot.branch, "pi-r/workbench");
+  assert.equal(snapshot.worker.state, "stopped");
+  assert.equal(snapshot.environment.identity, "design:bundled");
+  assert.deepEqual(snapshot.objects, []);
+  assert.ok(first.messages[1].content.length <= 4096);
+
+  const replaced = await projectContext({ messages: first.messages }, ctx);
+  assert.equal(replaced.messages.filter((message) => message.customType === "pi-r-live-state").length, 1);
+  assert.equal(h.appended.filter((entry) => entry.customType === "pi-r-live-state").length, 0);
+});
+
 test("design mode lazily evaluates structured R calls in one persistent sandbox", { timeout: 30_000 }, async (t) => {
   const root = await repository();
   const h = harness();
@@ -279,6 +308,16 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(first.details.error, null);
   assert.equal(first.details.worker.started, true);
   assert.equal(first.details.worker.environment, "design");
+  assert.doesNotMatch(first.content[0].text, /"objects"/);
+  const liveAfterFirst = await h.handlers.get("context")({ messages: [] }, ctx);
+  const firstSnapshot = JSON.parse(liveAfterFirst.messages[0].content);
+  assert.equal(firstSnapshot.worker.state, "running");
+  assert.equal(firstSnapshot.worker.transientStateLost, false);
+  const x = firstSnapshot.objects.find((object) => object.name === "x");
+  assert.equal(x.name, "x");
+  assert.equal(x.origin, "temporary");
+  assert.deepEqual(x.class, ["integer"]);
+  assert.ok(x.bytes > 0);
 
   const second = await evaluate.execute("evaluate-2", {
     code: "x + 2L",
@@ -288,6 +327,17 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(second.details.value, 43);
   assert.equal(second.details.worker.started, false);
   assert.match(ctx.widgets.at(-1)[1][0], /worker=running/);
+
+  await evaluate.execute("bounded-live-state", {
+    code: Array.from({ length: 60 }, (_, index) => `object_${index + 1} <- ${index + 1}L`).join("\n"),
+    targets: [],
+  }, undefined, undefined, ctx);
+  const boundedMessage = (await h.handlers.get("context")({ messages: [] }, ctx)).messages[0];
+  const boundedSnapshot = JSON.parse(boundedMessage.content);
+  assert.equal(boundedSnapshot.objectCount, 61);
+  assert.equal(boundedSnapshot.objectsTruncated, true);
+  assert.ok(boundedSnapshot.objects.length <= 50);
+  assert.ok(boundedMessage.content.length <= 4096);
 });
 
 test("the worker can write temporary storage but cannot mutate project or attached source", { timeout: 30_000 }, async (t) => {
@@ -341,6 +391,11 @@ test("worker status, reset, and crash recovery report transient state loss", { t
   assert.ok(cleared.details.lostObjects >= 1);
   assert.match(cleared.content[0].text, /transientStateLost.*true/);
   assert.equal((await status.execute("stopped", {}, undefined, undefined, ctx)).details.state, "stopped");
+  const resetSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(resetSnapshot.worker.state, "stopped");
+  assert.equal(resetSnapshot.worker.transientStateLost, true);
+  assert.equal(resetSnapshot.worker.targetsCache, "preserved");
+  assert.deepEqual(resetSnapshot.objects, []);
 
   await assert.rejects(
     evaluate.execute("crash", { code: "quit(save = 'no', status = 17L)", targets: [] }, undefined, undefined, ctx),
@@ -350,6 +405,10 @@ test("worker status, reset, and crash recovery report transient state loss", { t
   assert.equal(recovered.details.value, 1);
   assert.equal(recovered.details.worker.started, true);
   assert.equal(recovered.details.worker.transientStateLost, true);
+  const recoveredSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(recoveredSnapshot.worker.state, "running");
+  assert.equal(recoveredSnapshot.worker.transientStateLost, true);
+  assert.deepEqual(recoveredSnapshot.objects, []);
 });
 
 test("typed proposals preserve one ignored draft and /r lock commits the reviewed scaffold atomically", async () => {
@@ -416,12 +475,17 @@ test("evaluate_r loads only explicitly requested targets under canonical names",
   assert.equal(loaded.details.error, null);
   assert.equal(loaded.details.value, 42);
   assert.ok(loaded.details.objects.some((object) => object.name === "sample_target" && object.origin === "target"));
+  const loadedSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(loadedSnapshot.objects.find((object) => object.name === "sample_target").origin, "target");
   const unloaded = await evaluate.execute("omit-target", {
     code: "exists('sample_target', inherits = TRUE)",
     targets: [],
   }, undefined, undefined, ctx);
   assert.equal(unloaded.details.value, false);
   assert.ok(unloaded.details.objects.some((object) => object.name === "global_value" && object.origin === "global"));
+  const unloadedSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(unloadedSnapshot.objects.some((object) => object.name === "sample_target"), false);
+  assert.equal(unloadedSnapshot.objects.find((object) => object.name === "global_value").origin, "global");
 });
 
 test("locking restarts exploration in the generated environment with canonical globals and constants", { timeout: 180_000 }, async (t) => {
@@ -436,6 +500,13 @@ test("locking restarts exploration in the generated environment with canonical g
   await h.tools.find((tool) => tool.name === "r_contract_propose")
     .execute("proposal", contract, undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
+  const lockSnapshot = JSON.parse((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
+  assert.equal(lockSnapshot.phase, "implementation");
+  assert.equal(lockSnapshot.environment.identity, "project:generated");
+  assert.equal(lockSnapshot.worker.state, "stopped");
+  assert.equal(lockSnapshot.worker.transientStateLost, true);
+  assert.equal(lockSnapshot.transition, "contract-locked");
+  assert.deepEqual(lockSnapshot.objects, []);
 
   const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");

@@ -47,7 +47,7 @@ Confirmation writes the complete scaffold, creates one provenance commit, and en
 
 Implementation Mode exposes stale-safe Approved Function inspection and body replacement/exact patching. It preserves locked names and signatures, enforces the R policy, and creates one provenance commit per successful mutation without exposing shell or general write authority. See [Scoped Approved Function implementation](docs/scoped-implementation.md).
 
-Both constrained phases expose bounded temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. See [Persistent sandboxed R exploration](docs/r-worker.md).
+Both constrained phases expose bounded temporary exploration through a lazy, persistent R worker. Bubblewrap keeps project and attached source read-only while assignments persist in ephemeral state; contract lock restarts exploration in the generated project environment. One non-persistent Current-State HUD gives every agent call the latest bounded worker/object inventory without accumulating stale snapshots. See [Persistent sandboxed R exploration](docs/r-worker.md).
 
 Implementation Mode can list and run only contracted targets through a separate controlled runner. Full-pipeline execution is explicit, complete logs remain local, failures return bounded target/traceback details, and saved failed workspaces can be loaded into temporary worker state. See [Controlled target operations](docs/target-operations.md).
 

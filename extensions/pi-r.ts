@@ -6,7 +6,7 @@ import { renderScaffold } from "../src/contract/scaffold.js";
 import type { ProjectContract } from "../src/contract/types.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
-import { SandboxedRWorker, type WorkerEnvironment, type WorkerState } from "../src/workbench/r-worker.js";
+import { SandboxedRWorker, type WorkerEnvironment, type WorkerObject, type WorkerState } from "../src/workbench/r-worker.js";
 import { listTargets, runTargets } from "../src/workbench/target-runner.js";
 import { inspectArtifact, type ArtifactFacet } from "../src/workbench/artifact-inspector.js";
 
@@ -16,6 +16,9 @@ const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
 const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const ARTIFACT_TOOL = "r_artifact_inspect";
+const LIVE_STATE_MESSAGE = "pi-r-live-state";
+const MAX_LIVE_STATE_BYTES = 4096;
+const MAX_LIVE_OBJECTS = 50;
 const EVALUATE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -284,6 +287,62 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let proposalQueue: Promise<void> = Promise.resolve();
   let editQueue: Promise<void> = Promise.resolve();
   let workerQueue: Promise<void> = Promise.resolve();
+  let liveObjects: WorkerObject[] = [];
+  let liveTransientStateLost = false;
+  let liveTransition = "inactive";
+
+  function updateLiveWorker(objects: WorkerObject[], transientStateLost: boolean, transition?: string): void {
+    const originOrder: Record<WorkerObject["origin"], number> = { temporary: 0, target: 1, global: 2 };
+    liveObjects = [...objects].sort(
+      (left, right) => originOrder[left.origin] - originOrder[right.origin] || left.name.localeCompare(right.name),
+    );
+    liveTransientStateLost = transientStateLost;
+    if (transition) liveTransition = transition;
+  }
+
+  function environmentIdentity(): string {
+    if (!state || state.phase === "design") return "design:bundled";
+    if (!projectRscript) return "project:generated";
+    const store = projectRscript.match(/^\/nix\/store\/([^/]+)/)?.[1];
+    return `project:${store ?? basename(dirname(dirname(projectRscript)))}`.slice(0, 200);
+  }
+
+  function liveStateContent(): string {
+    if (!state) return "";
+    const allObjects = liveObjects.map((object) => ({
+      name: object.name.slice(0, 200),
+      origin: object.origin,
+      class: object.class.slice(0, 8).map((name) => name.slice(0, 200)),
+      bytes: object.bytes,
+    }));
+    const snapshot = {
+      version: 1,
+      phase: state.phase,
+      branch: state.branch,
+      head: shortHead(state.head),
+      contract: state.contractState,
+      policy: state.policyState,
+      editableScopes: state.editableScopeCount,
+      approval: state.pendingApproval,
+      environment: { identity: environmentIdentity() },
+      worker: {
+        state: state.workerState,
+        transientStateLost: liveTransientStateLost,
+        targetsCache: "preserved",
+      },
+      transition: liveTransition,
+      objectCount: allObjects.length,
+      objectsTruncated: allObjects.length > MAX_LIVE_OBJECTS,
+      objects: allObjects.slice(0, MAX_LIVE_OBJECTS),
+    };
+    let content = JSON.stringify(snapshot);
+    while (Buffer.byteLength(content) > MAX_LIVE_STATE_BYTES && snapshot.objects.length) {
+      snapshot.objects.pop();
+      snapshot.objectsTruncated = true;
+      content = JSON.stringify(snapshot);
+    }
+    return content;
+  }
 
   async function git(args: string[], cwd: string, allowFailure = false): Promise<ExecResult> {
     const result = await pi.exec("git", args, { cwd, timeout: 10_000 });
@@ -319,6 +378,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
       bwrap: process.env.PI_R_BWRAP,
       onState(nextState) {
         if (state) state = { ...state, workerState: nextState };
+        if (nextState !== "running") {
+          const lost = liveTransientStateLost || liveObjects.some((object) => object.origin !== "global");
+          updateLiveWorker([], lost, nextState === "crashed" ? "worker-crashed" : "worker-stopped");
+        }
       },
     });
     return worker;
@@ -360,7 +423,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
   async function workerStatusText(): Promise<string> {
     const status = worker
       ? await worker.status().catch(() => ({ state: "crashed" as const, objects: [], transientStateLost: true }))
-      : { state: "stopped" as const, objects: [], transientStateLost: false };
+      : { state: "stopped" as const, objects: [], transientStateLost: liveTransientStateLost };
+    updateLiveWorker(status.objects, status.transientStateLost);
     const inventory = status.objects.length
       ? status.objects.map((object) => `${object.name}~${object.bytes}B`).join(", ")
       : "none";
@@ -396,6 +460,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             runtime,
             signal,
           );
+          updateLiveWorker(result.objects, result.worker.transientStateLost, result.worker.started ? "worker-started" : "evaluation-complete");
           if (state) {
             state = { ...state, workerState: worker?.state ?? "stopped" };
             showHud(context, state);
@@ -405,7 +470,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
         workerQueue = operation.then(() => undefined, () => undefined);
         try {
           const result = await operation;
-          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+          const { objects: _liveInventory, ...modelResult } = result;
+          return { content: [{ type: "text", text: boundedJson(modelResult) }], details: result };
         } catch (error) {
           if (state) {
             state = { ...state, workerState: worker?.state ?? "crashed" };
@@ -424,7 +490,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
         await assertWorkerProvenance(context);
         const status = worker
           ? await worker.status()
-          : { state: "stopped" as const, objects: [], transientStateLost: false };
+          : { state: "stopped" as const, objects: [], transientStateLost: liveTransientStateLost };
+        updateLiveWorker(status.objects, status.transientStateLost);
         return { content: [{ type: "text", text: boundedJson(status) }], details: status };
       },
     });
@@ -437,11 +504,15 @@ export default function piRExtension(pi: ExtensionAPI): void {
         await assertWorkerProvenance(context);
         const reset = worker ? await worker.reset() : { lostObjects: 0, reason: "reset requested" };
         worker = undefined;
+        updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "worker-reset");
         if (state) {
           state = { ...state, workerState: "stopped" };
           showHud(context, state);
         }
-        return { content: [{ type: "text", text: boundedJson({ ...reset, transientStateLost: reset.lostObjects > 0 }) }], details: reset };
+        return {
+          content: [{ type: "text", text: boundedJson({ ...reset, transientStateLost: reset.lostObjects > 0, targetsCache: "preserved" }) }],
+          details: reset,
+        };
       },
     });
   }
@@ -544,7 +615,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
             timeoutMs,
             writableFiles: [...new Set(writableFiles)].sort(),
           }, signal);
-          await worker?.invalidateTargets().catch(() => undefined);
+          const remaining = await worker?.invalidateTargets().catch(() => undefined);
+          if (remaining) updateLiveWorker(remaining, liveTransientStateLost, "targets-invalidated");
           return { content: [{ type: "text", text: boundedJson(result) }], details: result };
         } catch (error) {
           throw actionableToolError(error);
@@ -567,6 +639,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           if (typeof target !== "string") throw new RecoverableError("INVALID_REQUEST", "A canonical target name is required");
           const runtime = await workerRuntime("project");
           const result = await workerInstance().loadWorkspace(target, runtime, signal);
+          updateLiveWorker(result.objects, result.worker.transientStateLost, result.worker.started ? "worker-started" : "workspace-loaded");
           if (state) {
             state = { ...state, workerState: worker?.state ?? "stopped" };
             showHud(context, state);
@@ -787,6 +860,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   function quarantine(context: CommandContext, message: string): void {
     previousActiveTools ??= pi.getActiveTools();
     state = undefined;
+    updateLiveWorker([], false, "inactive");
     pi.setActiveTools([]);
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", "R:resume blocked");
@@ -854,6 +928,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     worker?.stop(true);
     worker = undefined;
     projectRscript = undefined;
+    updateLiveWorker([], false, "workbench-started");
     registerProposalTool();
     registerWorkerTools();
     const next: WorkbenchState = {
@@ -884,9 +959,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (!state) throw new Error("Workbench state disappeared");
     const root = state.projectRoot;
     if (worker) {
-      await worker.reset("Project Contract locked; restarting in generated project environment");
+      const reset = await worker.reset("Project Contract locked; restarting in generated project environment");
       worker = undefined;
       projectRscript = undefined;
+      updateLiveWorker([], reset.lostObjects > 0 || liveTransientStateLost, "contract-locked-worker-reset");
       state = { ...state, workerState: "stopped" };
     }
     const paths = [...files.keys()];
@@ -967,6 +1043,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     registerTargetTools();
     registerArtifactTool();
     enterPhase(implementation);
+    updateLiveWorker([], liveTransientStateLost, "contract-locked");
     pi.appendEntry(STATE_ENTRY, implementation);
     showHud(context, implementation);
     context.ui.notify(`Project Contract locked: ${hud(implementation)}`, "info");
@@ -988,6 +1065,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         registerTargetTools();
         registerArtifactTool();
       }
+      updateLiveWorker([], false, "session-resumed");
       enterPhase({ ...restored, workerState: "stopped" });
       showHud(context, restored);
     } catch (error) {
@@ -998,6 +1076,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, context) => {
     worker?.stop();
     worker = undefined;
+    updateLiveWorker([], false, "inactive");
     if (previousActiveTools) pi.setActiveTools(previousActiveTools);
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", undefined);
@@ -1026,6 +1105,29 @@ export default function piRExtension(pi: ExtensionAPI): void {
       roots.some((root) => canonical === root || (!relative(root, canonical).startsWith(`..${sep}`) && relative(root, canonical) !== ".." && !isAbsolute(relative(root, canonical))));
     if (!permitted) return { block: true, reason: "pi-r read path is outside approved read-only roots" };
     return undefined;
+  });
+
+  pi.on("context", async (event) => {
+    if (!state) return undefined;
+    const messages = (Array.isArray(event.messages) ? event.messages : []).filter(
+      (message: unknown) => {
+        if (!message || typeof message !== "object") return true;
+        const candidate = message as { role?: unknown; customType?: unknown };
+        return candidate.role !== "custom" || candidate.customType !== LIVE_STATE_MESSAGE;
+      },
+    );
+    return {
+      messages: [
+        ...messages,
+        {
+          role: "custom",
+          customType: LIVE_STATE_MESSAGE,
+          content: liveStateContent(),
+          display: false,
+          timestamp: Date.now(),
+        },
+      ],
+    };
   });
 
   pi.on("before_agent_start", async (event) => {

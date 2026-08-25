@@ -25,13 +25,8 @@ When the session shuts down or is replaced, the extension restores the tool sele
 
 ## Current-State HUD
 
-The bounded HUD reports:
+The operator-facing TUI widget reports phase, branch and abbreviated HEAD, contract and policy state, editable-scope count, pending approval, and R worker state.
 
-- phase;
-- branch and abbreviated HEAD;
-- contract and policy state;
-- editable-scope count;
-- pending approval; and
-- R worker state.
+Separately, the extension projects one bounded `pi-r-live-state` message into the outgoing agent context before every model call. This Current-State HUD is never appended to session history: each projection removes an older projection and regenerates current phase, provenance, policy, environment, approval, worker, Transient State loss, and target-cache state. It includes at most 50 current object names, origins, classes, and approximate sizes without values, and remains below 4 KiB. Runtime inventory updates after evaluation, failed-workspace loading, target invalidation, reset, crash, contract lock, and resume. Inactive sessions project nothing.
 
-`/r status` also reports bounded worker object names and approximate sizes. See [Persistent sandboxed R exploration](r-worker.md) for worker lifecycle and loss reporting. Implementation Mode additionally exposes [Controlled target operations](target-operations.md) through a separate runner that never trusts worker state and [Target-backed artifact inspection](artifact-inspection.md) for bounded structural observations.
+Routine evaluation results therefore omit the repeated inventory; `r_worker_status` and `/r status` still provide explicit bounded object status. See [Persistent sandboxed R exploration](r-worker.md) for worker lifecycle and loss reporting. Implementation Mode additionally exposes [Controlled target operations](target-operations.md) through a separate runner that never trusts worker state and [Target-backed artifact inspection](artifact-inspection.md) for bounded structural observations.
