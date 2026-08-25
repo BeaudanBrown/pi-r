@@ -325,6 +325,11 @@ function showHud(context: CommandContext, state: WorkbenchState): void {
   context.ui.setStatus?.("pi-r", `R:${state.phase} ${state.branch}@${shortHead(state.head)}`);
 }
 
+function showStartProgress(context: CommandContext, step: string): void {
+  context.ui.setWidget?.("pi-r-hud", [`pi-r STARTING — ${step}`]);
+  context.ui.setStatus?.("pi-r", `R:starting · ${step}`);
+}
+
 function resultMessage(result: ExecResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 }
@@ -363,7 +368,12 @@ async function canonicalDestination(path: string): Promise<string> {
   }
 }
 
-async function validateSourceFileAuthority(contract: ProjectContract, projectRoot: string, readOnlyRoots: string[]): Promise<void> {
+async function validateSourceFileAuthority(
+  contract: ProjectContract,
+  projectRoot: string,
+  readOnlyRoots: string[],
+  fallbackProjectRoot?: string,
+): Promise<void> {
   const generatedPaths = contract.targets.filter((target) => target.artifact === "file" && !isSourceFileTarget(target))
     .flatMap((target) => fileTargetOutputs(target, contract.constants))
     .map((path) => resolve(projectRoot, path));
@@ -374,10 +384,17 @@ async function validateSourceFileAuthority(contract: ProjectContract, projectRoo
     const declared = contract.constants[target.source.constant];
     if (typeof declared !== "string") throw new Error(`Source File Target ${target.name} lost its string path`);
     const absoluteSource = isAbsolute(declared);
-    const requested = absoluteSource ? declared : resolve(projectRoot, declared);
-    const canonical = await realpath(requested).catch(() => undefined);
+    const primary = absoluteSource ? declared : resolve(projectRoot, declared);
+    let requested = primary;
+    let canonical = await realpath(primary).catch(() => undefined);
+    let relativeRoot = projectRoot;
+    if (!absoluteSource && !canonical && fallbackProjectRoot) {
+      requested = resolve(fallbackProjectRoot, declared);
+      canonical = await realpath(requested).catch(() => undefined);
+      relativeRoot = fallbackProjectRoot;
+    }
     if (!canonical) throw new Error(`Source File Target ${target.name} does not exist: ${declared}`);
-    const permittedRoots = absoluteSource ? readOnlyRoots : [projectRoot];
+    const permittedRoots = absoluteSource ? readOnlyRoots : [relativeRoot];
     const permitted = permittedRoots.some((root) => {
       const rel = relative(root, canonical);
       return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
@@ -571,6 +588,25 @@ export default function piRExtension(pi: ExtensionAPI): void {
     return worker;
   }
 
+  async function resolveProjectRuntime(projectRoot: string): Promise<string> {
+    const explicitProjectRuntime = process.env.PI_R_PROJECT_RSCRIPT;
+    if (explicitProjectRuntime) {
+      if (!isAbsolute(explicitProjectRuntime)) {
+        throw new RecoverableError("WORKER_START_FAILED", "Generated project R runtime override must be absolute");
+      }
+      return explicitProjectRuntime;
+    }
+    const result = await pi.exec(
+      "nix",
+      ["--extra-experimental-features", "nix-command flakes", "develop", `path:${projectRoot}`, "--command", "which", "Rscript"],
+      { cwd: projectRoot, timeout: 120_000 },
+    );
+    if (result.code !== 0 || !isAbsolute(result.stdout.trim())) {
+      throw new RecoverableError("WORKER_START_FAILED", `Generated project R environment is unavailable: ${resultMessage(result)}`);
+    }
+    return result.stdout.trim();
+  }
+
   async function workerRuntime(environment: WorkerEnvironment): Promise<string> {
     if (!state) throw new RecoverableError("INVALID_PHASE", "R exploration requires an active Workbench Session");
     if (environment === "design") {
@@ -578,24 +614,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       if (!rscript) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
       return rscript;
     }
-    if (projectRscript) return projectRscript;
-    const explicitProjectRuntime = process.env.PI_R_PROJECT_RSCRIPT;
-    if (explicitProjectRuntime) {
-      if (!isAbsolute(explicitProjectRuntime)) {
-        throw new RecoverableError("WORKER_START_FAILED", "Generated project R runtime override must be absolute");
-      }
-      projectRscript = explicitProjectRuntime;
-      return projectRscript;
-    }
-    const result = await pi.exec(
-      "nix",
-      ["--extra-experimental-features", "nix-command flakes", "develop", `path:${state.projectRoot}`, "--command", "which", "Rscript"],
-      { cwd: state.projectRoot, timeout: 120_000 },
-    );
-    if (result.code !== 0 || !isAbsolute(result.stdout.trim())) {
-      throw new RecoverableError("WORKER_START_FAILED", `Generated project R environment is unavailable: ${resultMessage(result)}`);
-    }
-    projectRscript = result.stdout.trim();
+    projectRscript ??= await resolveProjectRuntime(state.projectRoot);
     return projectRscript;
   }
 
@@ -1287,21 +1306,89 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   async function start(rootArguments: string[], context: CommandContext): Promise<void> {
+    if (state) throw new Error("pi-r Workbench Session is already active; use /r status or /r stop");
+    const startedAt = Date.now();
+    showStartProgress(context, "checking repository");
     const workingDirectory = await realpath(context.cwd);
     const rootResult = await git(["rev-parse", "--show-toplevel"], workingDirectory);
     const projectRoot = await realpath(rootResult.stdout.trim());
     await git(["rev-parse", "--verify", "HEAD"], workingDirectory);
 
+    showStartProgress(context, "validating read-only roots");
     const readOnlyRoots: string[] = [];
     for (const argument of rootArguments) {
       const requested = isAbsolute(argument) ? argument : resolve(workingDirectory, argument);
       readOnlyRoots.push(await approvedRoot(requested));
     }
     const uniqueRoots = [...new Set(readOnlyRoots)].sort();
-    const designRuntime = process.env.PI_R_RSCRIPT;
-    if (!designRuntime) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
-    await preflightWorker(projectRoot, uniqueRoots, "design", designRuntime);
+    const currentBranch = await git(["branch", "--show-current"], workingDirectory);
+    const branchExists = await git(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${WORKBENCH_BRANCH}`],
+      workingDirectory,
+      true,
+    );
+    let preflightedRuntime: string | undefined;
+    const preflightLocked = async (contract: ProjectContract, scaffoldRoot: string): Promise<void> => {
+      showStartProgress(context, "checking locked scaffold");
+      if (scaffoldRoot !== projectRoot) {
+        for (const target of contract.targets.filter(isSourceFileTarget)) {
+          const declared = contract.constants[target.source.constant];
+          if (typeof declared !== "string" || isAbsolute(declared)) continue;
+          const existsInTarget = await access(resolve(scaffoldRoot, declared)).then(() => true, () => false);
+          if (existsInTarget) continue;
+          const trackedInCurrent = await git(["ls-files", "--error-unmatch", "--", declared], projectRoot, true);
+          if (trackedInCurrent.code === 0) {
+            throw new Error(`Source File Target ${target.name} is tracked on the current branch but missing from ${WORKBENCH_BRANCH}`);
+          }
+        }
+      }
+      await validateSourceFileAuthority(
+        contract,
+        scaffoldRoot,
+        uniqueRoots,
+        scaffoldRoot === projectRoot ? undefined : projectRoot,
+      );
+      await checkScaffold(contract, scaffoldRoot);
+      showStartProgress(context, "resolving project R runtime");
+      preflightedRuntime = await resolveProjectRuntime(scaffoldRoot);
+      showStartProgress(context, "checking project R worker");
+      await preflightWorker(scaffoldRoot, uniqueRoots, "project", preflightedRuntime);
+    };
+    const currentContractPath = resolve(projectRoot, "pi-r.yml");
+    const canUseCurrentTree = currentBranch.stdout.trim() === WORKBENCH_BRANCH || branchExists.code !== 0;
+    if (canUseCurrentTree && await access(currentContractPath).then(() => true, () => false)) {
+      await preflightLocked(validateContract(JSON.parse(await readFile(currentContractPath, "utf8"))), projectRoot);
+    } else if (branchExists.code === 0 && currentBranch.stdout.trim() !== WORKBENCH_BRANCH) {
+      const contractAtBranch = await git(["show", `${WORKBENCH_BRANCH}:pi-r.yml`], projectRoot, true);
+      if (contractAtBranch.code === 0) {
+        const temporary = await mkdtemp(join(tmpdir(), "pi-r-start-checkout-"));
+        const checkout = resolve(temporary, "workbench");
+        try {
+          showStartProgress(context, "preflighting workbench branch");
+          const cloned = await pi.exec(
+            "git",
+            ["clone", "--quiet", "--shared", "--branch", WORKBENCH_BRANCH, "--single-branch", projectRoot, checkout],
+            { cwd: projectRoot, timeout: 30_000 },
+          );
+          if (cloned.code !== 0) throw new Error(`Cannot preflight workbench branch: ${resultMessage(cloned)}`);
+          await preflightLocked(validateContract(JSON.parse(contractAtBranch.stdout)), checkout);
+        } finally {
+          await rm(temporary, { recursive: true, force: true });
+        }
+      } else {
+        const designRuntime = process.env.PI_R_RSCRIPT;
+        if (!designRuntime) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
+        showStartProgress(context, "checking sandboxed R");
+        await preflightWorker(projectRoot, uniqueRoots, "design", designRuntime);
+      }
+    } else {
+      const designRuntime = process.env.PI_R_RSCRIPT;
+      if (!designRuntime) throw new RecoverableError("WORKER_START_FAILED", "Bundled design R runtime is unavailable");
+      showStartProgress(context, "checking sandboxed R");
+      await preflightWorker(projectRoot, uniqueRoots, "design", designRuntime);
+    }
 
+    showStartProgress(context, "preparing workbench branch");
     const dirty = await git(["status", "--porcelain", "--untracked-files=no"], workingDirectory);
     if (dirty.stdout.trim()) {
       await git(
@@ -1310,18 +1397,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
       );
     }
 
-    const branchExists = await git(
-      ["show-ref", "--verify", "--quiet", `refs/heads/${WORKBENCH_BRANCH}`],
-      workingDirectory,
-      true,
-    );
-    const currentBranch = await git(["branch", "--show-current"], workingDirectory);
     if (currentBranch.stdout.trim() !== WORKBENCH_BRANCH) {
       if (branchExists.code === 0) await git(["switch", WORKBENCH_BRANCH], workingDirectory);
       else await git(["switch", "-c", WORKBENCH_BRANCH], workingDirectory);
     }
 
     const head = (await git(["rev-parse", "HEAD"], workingDirectory)).stdout.trim();
+    showStartProgress(context, "checking Project Contract");
     const contractPath = resolve(projectRoot, "pi-r.yml");
     const hasLockedContract = await access(contractPath).then(() => true, () => false);
     const lockedContract = hasLockedContract
@@ -1340,13 +1422,16 @@ export default function piRExtension(pi: ExtensionAPI): void {
     let contractState: WorkbenchState["contractState"] = "missing";
     let editableScopeCount = 0;
     if (lockedContract) {
-      const validated = await validateContractEnvironment(
-        projectRoot,
-        lockedContract,
-        (command, args, options) => pi.exec(command, args, options),
-      );
-      await preflightWorker(projectRoot, uniqueRoots, "project", validated.runtime);
-      projectRscript = validated.runtime;
+      let runtime = preflightedRuntime;
+      if (!runtime) {
+        showStartProgress(context, "checking locked scaffold");
+        await checkScaffold(lockedContract, projectRoot);
+        showStartProgress(context, "resolving project R runtime");
+        runtime = await resolveProjectRuntime(projectRoot);
+        showStartProgress(context, "checking project R worker");
+        await preflightWorker(projectRoot, uniqueRoots, "project", runtime);
+      }
+      projectRscript = runtime;
       phase = "implementation";
       contractState = "locked";
       editableScopeCount = lockedContract.functions.length;
@@ -1377,7 +1462,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     enterPhase(next);
     pi.appendEntry(STATE_ENTRY, next);
     showHud(context, next);
-    context.ui.notify(`pi-r workbench started: ${hud(next)}`, "info");
+    context.ui.notify(`pi-r workbench started in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: ${hud(next)}`, "info");
   }
 
   async function publicationCandidate(contract: ProjectContract): Promise<DeliverablePublication> {
@@ -2019,6 +2104,11 @@ export default function piRExtension(pi: ExtensionAPI): void {
       try {
         await start(rest, context);
       } catch (error) {
+        if (state) showHud(context, state);
+        else {
+          context.ui.setWidget?.("pi-r-hud", undefined);
+          context.ui.setStatus?.("pi-r", undefined);
+        }
         context.ui.notify(`pi-r start failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },

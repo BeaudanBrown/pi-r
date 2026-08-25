@@ -153,6 +153,7 @@ function harness(entries = []) {
   const handlers = new Map();
   const activeToolChanges = [];
   const appended = [];
+  const execCalls = [];
   const allTools = ["read", "grep", "find", "ls", "bash", "edit", "write"].map((name) => ({
     name,
     sourceInfo: { source: "builtin" },
@@ -166,6 +167,7 @@ function harness(entries = []) {
     getActiveTools() { return allTools.map((tool) => tool.name); },
     setActiveTools(names) { activeToolChanges.push([...names]); },
     async exec(command, args, options = {}) {
+      execCalls.push({ command, args: [...args], options });
       try {
         const result = await execFileAsync(command, args, {
           cwd: options.cwd,
@@ -184,7 +186,7 @@ function harness(entries = []) {
     },
   };
   extension.default(pi);
-  return { commands, tools, handlers, activeToolChanges, appended, entries };
+  return { commands, tools, handlers, activeToolChanges, appended, entries, execCalls };
 }
 
 function schemaPatterns(value, output = []) {
@@ -214,6 +216,7 @@ function context(root, entries = [], confirmations = []) {
   const notifications = [];
   const widgets = [];
   const confirmationRequests = [];
+  const statuses = [];
   return {
     cwd: root,
     sessionManager: {
@@ -223,7 +226,7 @@ function context(root, entries = [], confirmations = []) {
     ui: {
       notify(...args) { notifications.push(args); },
       setWidget(...args) { widgets.push(args); },
-      setStatus() {},
+      setStatus(...args) { statuses.push(args); },
       async confirm(...args) {
         confirmationRequests.push(args);
         return confirmations.shift() ?? false;
@@ -232,6 +235,7 @@ function context(root, entries = [], confirmations = []) {
     notifications,
     widgets,
     confirmationRequests,
+    statuses,
   };
 }
 
@@ -283,6 +287,78 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   const resumedContext = context(root, h.appended);
   await resumed.handlers.get("session_start")({}, resumedContext);
   assert.equal(resumed.activeToolChanges.length, 0, "an explicit stop marker must prevent later session resume");
+});
+
+test("/r start resumes a locked project without repeating full environment validation and reports progress", { timeout: 60_000 }, async () => {
+  const root = await repository();
+  const generatedBase = await mkdtemp(join(tmpdir(), "pi-r-locked-start-"));
+  const generated = join(generatedBase, "generated");
+  await execFileAsync(cli, ["contract", "generate", contractFixture, generated]);
+  await execFileAsync("cp", ["-R", `${generated}/.`, root]);
+  await git(root, "add", "-A");
+  await git(root, "commit", "-qm", "locked project");
+  await git(root, "switch", "-qc", "pi-r/workbench");
+  const h = harness();
+  const ctx = context(root);
+
+  await h.commands[0].options.handler("start", ctx);
+
+  assert.equal(h.appended.at(-1).data.phase, "implementation");
+  const progress = ctx.statuses.map(([, value]) => value).filter((value) => /R:starting/.test(value));
+  assert.ok(progress.some((value) => /checking repository/.test(value)), "start must expose immediate repository progress");
+  assert.ok(progress.some((value) => /checking locked scaffold/.test(value)), "start must expose locked-scaffold progress");
+  assert.ok(progress.some((value) => /resolving project R runtime/.test(value)), "start must expose runtime-resolution progress");
+  assert.ok(progress.some((value) => /checking project R worker/.test(value)), "start must expose worker-health progress");
+  assert.match(ctx.notifications.at(-1)[0], /pi-r workbench started in \d+\.\d+s/);
+  assert.equal(
+    h.execCalls.some(({ command, args }) => command === "nix" && args.includes("eval")),
+    false,
+    "a previously validated locked contract must not repeat package resolution",
+  );
+
+  await h.commands[0].options.handler("start", ctx);
+  assert.match(ctx.notifications.at(-1)[0], /already active/);
+  assert.doesNotMatch(ctx.statuses.at(-1)[1], /R:starting/, "failed restart must preserve the active HUD status");
+});
+
+test("locked workbench source preflight fails before switching or stashing another branch", { timeout: 60_000 }, async () => {
+  const root = await repository();
+  const originalBranch = await git(root, "branch", "--show-current");
+  await git(root, "switch", "-qc", "pi-r/workbench");
+  await git(root, "switch", originalBranch);
+  await writeFile(join(root, "branch-source.csv"), "value\n1\n");
+  await git(root, "add", "branch-source.csv");
+  await git(root, "commit", "-qm", "source only on current branch");
+
+  const definition = await fixtureContract();
+  definition.constants.branch_source = "branch-source.csv";
+  definition.targets.unshift({
+    name: "branch_source_file",
+    artifact: "file",
+    arguments: {},
+    source: { constant: "branch_source" },
+  });
+  definition.targets.find((target) => target.name === "raw_data").arguments.path = { target: "branch_source_file" };
+  const contractPath = join(await mkdtemp(join(tmpdir(), "pi-r-branch-source-contract-")), "contract.json");
+  await writeFile(contractPath, JSON.stringify(definition));
+  const generatedBase = await mkdtemp(join(tmpdir(), "pi-r-locked-preflight-"));
+  const generated = join(generatedBase, "generated");
+  await execFileAsync(cli, ["contract", "generate", contractPath, generated]);
+  await git(root, "switch", "pi-r/workbench");
+  await execFileAsync("cp", ["-R", `${generated}/.`, root]);
+  await git(root, "add", "-A");
+  await git(root, "commit", "-qm", "locked project missing current branch source");
+  await git(root, "switch", originalBranch);
+  await writeFile(join(root, "analysis.R"), "value <- 2\n");
+  const h = harness();
+  const ctx = context(root);
+
+  await h.commands[0].options.handler("start", ctx);
+
+  assert.equal(await git(root, "branch", "--show-current"), originalBranch);
+  assert.equal(await git(root, "stash", "list"), "");
+  assert.equal(await readFile(join(root, "analysis.R"), "utf8"), "value <- 2\n");
+  assert.match(ctx.notifications.at(-1)[0], /branch_source_file is tracked on the current branch but missing from pi-r\/workbench/);
 });
 
 test("/r start preflight rejects an unavailable sandbox runtime before Git mutation", async () => {
