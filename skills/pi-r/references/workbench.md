@@ -64,7 +64,7 @@ The `output.parameter` must name an Approved Function parameter omitted from `ar
 
 ## Implementation and Contract Revision Modes
 
-General shell and mutation are unavailable. Approved Function bodies are the only source-edit scope. Target listing/execution/workspace recovery, artifact inspection, governed dependency proposals, bounded dependency research, and the persistent R worker are exposed as typed tools. Source and attached roots are read-only inside Bubblewrap execution.
+General shell and mutation are unavailable. Approved Function bodies are the only source-edit scope. Before editing, list the locked targets and inspect the function for its current digest. `r_function_edit` accepts only statements from inside the body; omit the function declaration and braces. Governed package functions are available without forbidden `::` namespace operators. For data.table dynamic column selection, use an explicit mechanism such as `.SDcols`, and validate required column names first. Target listing/execution/workspace recovery, artifact inspection, governed dependency proposals, bounded dependency research, and the persistent R worker are exposed as typed tools. Source and attached roots are read-only inside Bubblewrap execution.
 
 Implementation Mode locks function/target topology. Dependency-only changes use `r_dependency_propose` and user-only `/r environment`. Topology changes require user-only `/r revise`, which seeds an ignored draft while committed source stays unchanged. `/r lock` publishes the revision while preserving bodies whose Approved Function names and signatures did not change; `/r cancel-revision` returns to the unchanged locked contract.
 

@@ -145,29 +145,14 @@ const INSPECT_SCHEMA = {
 const EDIT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["function", "expectedSourceHash", "operation"],
+  required: ["function", "expectedSourceHash", "statements"],
   properties: {
     function: { type: "string", minLength: 1 },
     expectedSourceHash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
-    operation: {
-      oneOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "body"],
-          properties: { kind: { const: "replace" }, body: { type: "string" } },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "oldText", "newText"],
-          properties: {
-            kind: { const: "patch" },
-            oldText: { type: "string", minLength: 1 },
-            newText: { type: "string" },
-          },
-        },
-      ],
+    statements: {
+      type: "string",
+      minLength: 1,
+      description: "R statements inside the function body; omit the function declaration and outer braces",
     },
   },
 } as const;
@@ -1135,6 +1120,32 @@ export default function piRExtension(pi: ExtensionAPI): void {
     });
   }
 
+  function modelEditRequest(params: unknown): unknown {
+    if (!params || typeof params !== "object") return params;
+    const input = params as Record<string, unknown>;
+    if (typeof input.statements !== "string") return params;
+    const statements = input.statements.trim();
+    if (!statements) {
+      throw new RecoverableError("INVALID_EDIT_SHAPE", "statements must contain R code", undefined, {
+        retryable: true,
+        agentAction: "Provide only statements from inside the Approved Function body",
+      });
+    }
+    if (/^(?:[A-Za-z.][A-Za-z0-9._]*\s*<-\s*)?function\s*\(/s.test(statements) || statements.startsWith("{")) {
+      throw new RecoverableError(
+        "INVALID_EDIT_SHAPE",
+        "statements must omit the function declaration and outer braces",
+        { example: "fread(shhs1_status_file)" },
+        { retryable: true, agentAction: "Retry once with only the statements inside the function body" },
+      );
+    }
+    return {
+      function: input.function,
+      expectedSourceHash: input.expectedSourceHash,
+      operation: { kind: "replace", body: `{\n${statements}\n}` },
+    };
+  }
+
   async function applyScopedEdit(params: unknown, context: CommandContext): Promise<unknown> {
     if (!state || state.phase !== "implementation") {
       throw new RecoverableError("INVALID_PHASE", "Approved Function edits require active Implementation Mode");
@@ -1145,7 +1156,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     if (dirty.stdout.trim()) {
       throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside the scoped edit capability");
     }
-    const prepared = await prepareScopedMutation(state.projectRoot, params);
+    const prepared = await prepareScopedMutation(state.projectRoot, modelEditRequest(params));
     const destination = resolve(state.projectRoot, prepared.path);
     if ((await readFile(destination, "utf8")) !== prepared.original) {
       throw new RecoverableError("STALE_CONTENT", "Approved Function file changed before commit");
@@ -1235,8 +1246,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: EDIT_TOOL,
       label: "Edit Approved R function body",
-      description: "Replace or exact-patch one contract-approved function body, validate it, and create one provenance commit.",
-      promptSnippet: "Edit only Approved Function bodies using a current sha256 source digest; no path or general write authority is accepted",
+      description: "Replace one Approved Function body. Pass only its inner R statements: no function declaration and no outer braces. pi-r wraps, formats, validates, and commits them. Governed package functions are called without :: namespace operators.",
+      promptSnippet: "Inspect immediately before editing, then pass only inner body statements with the current sha256 digest; do not include function(...) or braces and do not use ::",
       parameters: EDIT_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = editQueue.then(() => applyScopedEdit(params, context));

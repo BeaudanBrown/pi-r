@@ -749,11 +749,21 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
 
   const inspect = h.tools.find((tool) => tool.name === "r_function_inspect");
   const edit = h.tools.find((tool) => tool.name === "r_function_edit");
+  assert.deepEqual(edit.parameters.required, ["function", "expectedSourceHash", "statements"]);
+  assert.equal(edit.parameters.properties.operation, undefined);
   const inspected = await inspect.execute("inspect", { function: "load_input" }, undefined, undefined, ctx);
+  await assert.rejects(
+    edit.execute("invalid-shape", {
+      function: "load_input",
+      expectedSourceHash: inspected.details.sourceHash,
+      statements: "function(path) { path }",
+    }, undefined, undefined, ctx),
+    /INVALID_EDIT_SHAPE.*omit the function declaration and outer braces/,
+  );
   await edit.execute("edit", {
     function: "load_input",
     expectedSourceHash: inspected.details.sourceHash,
-    operation: { kind: "replace", body: "{\npath\n}" },
+    statements: "path",
   }, undefined, undefined, ctx);
   const implemented = await readFile(join(root, "R/load_input.R"), "utf8");
 
