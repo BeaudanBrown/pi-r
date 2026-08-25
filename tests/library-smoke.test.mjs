@@ -15,6 +15,7 @@ test("the packaged TypeScript library exposes its version and resources", async 
   const paths = library.resourcePaths();
   assert.deepEqual(Object.keys(paths).sort(), ["extension", "rHelper", "reference", "resources", "scoutExtension", "skill", "technologyPolicy"]);
   await Promise.all(Object.values(paths).map((path) => access(path)));
+  assert.equal(library.resourcePaths({ PI_R_TEST_RESOURCE_ROOT: "/tmp/test-resources" }).resources, "/tmp/test-resources");
 });
 
 async function failingExecutable(name, diagnostic, code) {
@@ -48,14 +49,22 @@ test("Tree-sitter runtime failures are non-retryable and distinct from R syntax"
   }
 });
 
-test("base-R parser test overrides remain library-only", async () => {
+test("base-R runtime failures are distinct from parse diagnostics", async () => {
   const candidate = join(await mkdtemp(join(tmpdir(), "pi-r-valid-base-r-")), "candidate.R");
   await writeFile(candidate, "answer <- function() { 42 }\n");
   const previous = process.env.PI_R_TEST_BASE_RSCRIPT;
   try {
-    process.env.PI_R_TEST_BASE_RSCRIPT = await failingExecutable("Rscript", "base parser failed", 1);
+    process.env.PI_R_TEST_BASE_RSCRIPT = await failingExecutable("Rscript", "base runtime failed", 1);
+    await assert.rejects(library.assertBaseRParse([candidate]), (error) => {
+      assert.equal(error.structured.code, "RUNTIME_INCOMPATIBLE");
+      assert.equal(error.structured.retryable, false);
+      return true;
+    });
+
+    process.env.PI_R_TEST_BASE_RSCRIPT = await failingExecutable("Rscript", "Error in parse: unexpected ')'", 1);
     await assert.rejects(library.assertBaseRParse([candidate]), (error) => {
       assert.equal(error.structured.code, "INVALID_R_SYNTAX");
+      assert.equal(error.structured.retryable, true);
       return true;
     });
   } finally {

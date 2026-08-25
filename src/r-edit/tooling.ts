@@ -61,11 +61,26 @@ export async function assertBaseRParse(paths: readonly string[]): Promise<void> 
       ],
       { maxBuffer: 4 * 1024 * 1024 },
     );
-  } catch {
+  } catch (error) {
+    const failure = error as { stdout?: unknown; stderr?: unknown };
+    const diagnostic = [failure.stderr, failure.stdout]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim())
+      .join("\n")
+      .slice(0, 2000);
+    if (/error in parse|parse error|unexpected/i.test(diagnostic)) {
+      throw new RecoverableError(
+        "INVALID_R_SYNTAX",
+        "Candidate failed a fresh base-R parse",
+        { validator: "base-r", ...(diagnostic ? { diagnostic } : {}) },
+        { retryable: true, agentAction: "Correct the candidate R syntax before retrying" },
+      );
+    }
     throw new RecoverableError(
-      "INVALID_R_SYNTAX",
-      "Candidate failed a fresh base-R parse",
-      { validator: "base-r" },
+      "RUNTIME_INCOMPATIBLE",
+      "The base-R validator could not execute the candidate parse",
+      { validator: "base-r", phase: "parse", ...(diagnostic ? { diagnostic } : {}) },
+      { retryable: false, agentAction: "Do not change the R candidate; restart with one coherent pi-r runtime" },
     );
   }
 }

@@ -102,7 +102,8 @@
                 --unset PI_R_TEST_TREE_SITTER \
                 --unset PI_R_TEST_TREE_SITTER_R \
                 --unset PI_R_TEST_TREE_SITTER_QUERY \
-                --unset PI_R_TEST_BASE_RSCRIPT
+                --unset PI_R_TEST_BASE_RSCRIPT \
+                --unset PI_R_TEST_RESOURCE_ROOT
               runHook postInstall
             '';
 

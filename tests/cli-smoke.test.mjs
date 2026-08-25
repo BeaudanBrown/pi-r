@@ -24,7 +24,7 @@ test("the packaged CLI exposes usable Pi and R resource paths", async () => {
   await Promise.all(Object.values(paths).map((path) => access(path)));
 });
 
-test("paths can be resolved from an explicit resource root", async () => {
+test("the packaged CLI ignores inherited test resource roots", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-r-resources-"));
   await mkdir(join(root, "extensions"));
   await mkdir(join(root, "R"));
@@ -42,11 +42,6 @@ test("paths can be resolved from an explicit resource root", async () => {
   });
   const paths = JSON.parse(stdout);
 
-  assert.equal(paths.resources, root);
-  assert.equal(paths.extension, join(root, "extensions", "pi-r.ts"));
-  assert.equal(paths.scoutExtension, join(root, "extensions", "pi-r-dependency-scout.ts"));
-  assert.equal(paths.skill, join(root, "skills", "pi-r", "SKILL.md"));
-  assert.equal(paths.reference, join(root, "skills", "pi-r", "references", "workbench.md"));
-  assert.equal(paths.rHelper, join(root, "R", "pi_r_runtime.R"));
-  assert.equal(paths.technologyPolicy, join(root, "resources", "technology-policy-v1.json"));
+  assert.notEqual(paths.resources, root);
+  await Promise.all(Object.values(paths).map((path) => access(path)));
 });
