@@ -248,7 +248,13 @@ export async function checkScaffold(contract: ProjectContract, projectPath: stri
       ) {
         drift.add(relativePath);
       }
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof RecoverableError &&
+        ["RUNTIME_INCOMPATIBLE", "TREE_SITTER_FAILURE"].includes(error.structured.code)
+      ) {
+        throw error;
+      }
       drift.add(relativePath);
     }
   }
