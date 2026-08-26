@@ -18,12 +18,24 @@ constants:
 functions:
   - name: load_input
     parameters: [path]
+    purpose: Load the approved input table
+    requirements:
+      - Return a data.table without changing the input path
   - name: make_config
     parameters: [threshold]
+    purpose: Construct the analysis configuration
+    requirements:
+      - Preserve threshold as a finite scalar
   - name: summarise_groups
     parameters: [input, config]
+    purpose: Produce the approved grouped summaries
+    requirements:
+      - Return a data.table with deterministic grouping
   - name: write_result
     parameters: [table, config, output_path]
+    purpose: Write the approved summary artifact
+    requirements:
+      - Write only output_path and return that exact path
 targets:
   - name: raw_data
     function: load_input

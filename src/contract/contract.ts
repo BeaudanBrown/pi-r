@@ -59,6 +59,12 @@ function string(value: unknown, path: string): string {
   return value;
 }
 
+function boundedString(value: unknown, path: string, maxLength: number): string {
+  const result = string(value, path);
+  if (result.length > maxLength) invalid(`${path} must contain at most ${maxLength} characters`);
+  return result;
+}
+
 function rName(value: unknown, path: string): string {
   const name = string(value, path);
   if (name.length > 100) invalid(`${path} must contain at most 100 characters`);
@@ -265,6 +271,17 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
   const project = object(proposal.project, "proposal.project");
   exactKeys(project, ["name"], "proposal.project");
   const issues = proposalSemanticIssues(proposal);
+  if (Array.isArray(proposal.functions)) {
+    proposal.functions.forEach((entry, index) => {
+      const candidate = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
+      if (typeof candidate.purpose !== "string" || candidate.purpose.length === 0) {
+        issues.push(`functions[${index}].purpose: new proposals must state the user-approved domain purpose`);
+      }
+      if (!Array.isArray(candidate.requirements) || candidate.requirements.length === 0) {
+        issues.push(`functions[${index}].requirements: new proposals must state at least one user-approved behavioral requirement`);
+      }
+    });
+  }
   if (issues.length > 0) {
     invalid(`proposal has ${issues.length} semantic issue${issues.length === 1 ? "" : "s"}:\n- ${issues.join("\n- ")}\nAll listed issues must be corrected together; unlisted fields have not yet passed authoritative validation.`, {
       issues,
@@ -344,10 +361,22 @@ export function validateContract(input: unknown): ProjectContract {
   if (!Array.isArray(functionsInput)) invalid("functions must be an array");
   const functions = functionsInput.map((entry, index) => {
     const fn = object(entry, `functions[${index}]`);
-    exactKeys(fn, ["name", "parameters"], `functions[${index}]`);
+    const path = `functions[${index}]`;
+    exactKeys(fn, ["name", "parameters", "purpose", "requirements"], path);
+    let requirements: string[] | undefined;
+    if (fn.requirements !== undefined) {
+      requirements = stringArray(fn.requirements, `${path}.requirements`).map((requirement, requirementIndex) =>
+        boundedString(requirement, `${path}.requirements[${requirementIndex}]`, 500),
+      );
+      if (requirements.length === 0 || requirements.length > 20) {
+        invalid(`${path}.requirements must contain between 1 and 20 entries`);
+      }
+    }
     return {
-      name: rName(fn.name, `functions[${index}].name`),
-      parameters: stringArray(fn.parameters, `functions[${index}].parameters`, true),
+      name: rName(fn.name, `${path}.name`),
+      parameters: stringArray(fn.parameters, `${path}.parameters`, true),
+      ...(fn.purpose !== undefined ? { purpose: boundedString(fn.purpose, `${path}.purpose`, 1000) } : {}),
+      ...(requirements ? { requirements } : {}),
     };
   });
   if (new Set(functions.map((fn) => fn.name)).size !== functions.length) invalid("function names must be unique");

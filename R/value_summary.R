@@ -18,11 +18,14 @@ pi_r_bound_string <- function(value, max_bytes = 1000L) {
 }
 
 pi_r_column_summary <- function(column, name) {
+  counts <- sort(table(column, useNA = "ifany"), decreasing = TRUE)
   common <- list(
     name = substr(name, 1L, 200L),
     class = as.list(substr(head(class(column), 4L), 1L, 100L)),
     missing = sum(is.na(column)),
-    unique = length(unique(column))
+    blank = if (is.character(column)) sum(!is.na(column) & trimws(column) == "") else 0L,
+    unique = length(unique(column)),
+    topComplete = length(counts) <= 10L
   )
   if (is.numeric(column)) {
     finite <- column[is.finite(column)]
@@ -32,7 +35,6 @@ pi_r_column_summary <- function(column, name) {
       mean = if (length(finite)) mean(finite) else NULL
     )))
   }
-  counts <- sort(table(column, useNA = "ifany"), decreasing = TRUE)
   count_names <- names(head(counts, 10L))
   c(common, list(top = unname(lapply(seq_along(count_names), function(index) list(
     value = pi_r_bound_string(count_names[[index]], 200L),
@@ -72,6 +74,10 @@ pi_r_table_summary <- function(value, columns = character(), column_offset = 0L,
   )
 }
 
+pi_r_atomic_value <- function(value) {
+  if (is.character(value)) pi_r_bound_string(value, 500L) else value
+}
+
 pi_r_value_summary <- function(value, depth = 0L, max_depth = 2L, max_entries = 20L,
                                columns = character(), column_offset = 0L, column_limit = 20L) {
   if (is.null(value)) return(list(kind = "null"))
@@ -80,6 +86,63 @@ pi_r_value_summary <- function(value, depth = 0L, max_depth = 2L, max_entries = 
   }
   classes <- as.list(substr(head(class(value), 8L), 1L, 100L))
   bytes <- length(serialize(value, NULL))
+  if (inherits(value, "table")) {
+    table_names <- names(value)
+    if (is.null(table_names)) table_names <- as.character(seq_along(value))
+    count <- min(length(value), max_entries)
+    return(list(
+      kind = "frequency-table",
+      class = classes,
+      length = length(value),
+      bytes = bytes,
+      entries = unname(lapply(seq_len(count), function(index) list(
+        value = pi_r_bound_string(table_names[[index]] %||% "", 200L),
+        count = unname(value[[index]])
+      ))),
+      complete = length(value) <= count,
+      omitted = max(0L, length(value) - count)
+    ))
+  }
+  dimensions <- dim(value)
+  if (is.atomic(value) && !is.null(dimensions)) {
+    count <- min(length(value), max_entries)
+    dimension_names <- dimnames(value) %||% vector("list", length(dimensions))
+    cells <- unname(lapply(seq_len(count), function(index) {
+      coordinates <- arrayInd(index, dimensions)
+      labels <- unname(lapply(seq_along(dimensions), function(dimension) {
+        names <- dimension_names[[dimension]]
+        if (is.null(names)) NULL else pi_r_bound_string(names[[coordinates[[dimension]]]], 200L)
+      }))
+      list(index = as.list(unname(coordinates)), labels = labels, value = pi_r_atomic_value(value[[index]]))
+    }))
+    return(list(
+      kind = if (length(dimensions) == 2L) "matrix" else "array",
+      class = classes,
+      length = length(value),
+      bytes = bytes,
+      dimensions = as.list(unname(dimensions)),
+      dimensionNames = unname(lapply(names(dimension_names) %||% rep("", length(dimensions)), pi_r_bound_string, max_bytes = 200L)),
+      cells = cells,
+      complete = length(value) <= count,
+      omitted = max(0L, length(value) - count)
+    ))
+  }
+  value_names <- names(value)
+  if (is.atomic(value) && !is.null(value_names)) {
+    count <- min(length(value), max_entries)
+    return(list(
+      kind = "named-vector",
+      class = classes,
+      length = length(value),
+      bytes = bytes,
+      entries = unname(lapply(seq_len(count), function(index) list(
+        name = pi_r_bound_string(value_names[[index]], 200L),
+        value = pi_r_atomic_value(value[[index]])
+      ))),
+      complete = length(value) <= count,
+      omitted = max(0L, length(value) - count)
+    ))
+  }
   if (is.atomic(value)) {
     shown <- head(value, max_entries)
     bounded_values <- if (is.character(shown)) {

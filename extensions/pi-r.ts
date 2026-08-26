@@ -8,7 +8,7 @@ import { fileTargetOutputs } from "../src/contract/deliverables.js";
 import { isSourceFileTarget, type NixpkgsPin, type ProjectContract } from "../src/contract/types.js";
 import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
-import { inspectApprovedFunction, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
+import { inspectApprovedFunctions, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
 import { SandboxedRWorker, type WorkerEnvironment, type WorkerObject, type WorkerState } from "../src/workbench/r-worker.js";
 import { listTargets, runTargets } from "../src/workbench/target-runner.js";
 import { inspectArtifact, type ArtifactFacet } from "../src/workbench/artifact-inspector.js";
@@ -36,7 +36,7 @@ const DATA_TOOL = "r_data_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
 const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-current-state";
-const PI_R_RUNTIME_VERSION = "0.19.0";
+const PI_R_RUNTIME_VERSION = "0.20.0";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
 const MODEL_R_NAME_PATTERN = "^[A-Za-z.][A-Za-z0-9._]*$";
@@ -60,7 +60,8 @@ const CONTRACT_PROPOSAL_SCHEMA = (() => {
   delete schema.properties.policyVersion;
   schema.properties.project.required = ["name"];
   delete schema.properties.project.properties.nixpkgs;
-  schema.description = "Complete Design or Revision Mode project decisions. Approved Functions declare signatures only; targets call those functions, while Source File Targets use source.constant and omit function/output.";
+  schema.properties.functions.items.required = ["name", "parameters", "purpose", "requirements"];
+  schema.description = "Complete Design or Revision Mode project decisions. Approved Functions declare signatures plus user-approved purpose and behavioral requirements, never bodies. Requirements state relevant missing-value, duplicate, coding, cohort, and output rules. Targets call those functions, while Source File Targets use source.constant and omit function/output.";
   llamaCompatibleSchema(schema);
   return schema;
 })();
@@ -84,9 +85,9 @@ const EVALUATE_SCHEMA = {
   additionalProperties: false,
   required: ["code", "targets", "retain"],
   properties: {
-    code: { type: "string", minLength: 1, maxLength: 50_000 },
-    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
-    retain: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
+    code: { type: "string", minLength: 1, maxLength: 50_000, description: "R expressions to evaluate. Make the final expression the structured value to return; do not use cat(), print(), cbind(), or hand-formatted text for inspection." },
+    targets: { type: "array", maxItems: 100, uniqueItems: true, description: "Existing canonical targets artifacts to load before evaluation. These are not assignment names created by code.", items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
+    retain: { type: "array", maxItems: 100, uniqueItems: true, description: "Assignment names to preserve only after complete successful evaluation. The final expression is returned whether or not it is retained.", items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
   },
 } as const;
 const OBJECT_INSPECT_SCHEMA = {
@@ -155,8 +156,17 @@ const EDIT_TOOL = "r_function_edit";
 const INSPECT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["function"],
-  properties: { function: { type: "string", minLength: 1 } },
+  required: ["functions"],
+  properties: {
+    functions: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      uniqueItems: true,
+      description: "Approved Functions to inspect together. Use a one-item array immediately before editing one function.",
+      items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 100 },
+    },
+  },
 } as const;
 const EDIT_SCHEMA = {
   type: "object",
@@ -341,7 +351,10 @@ function resultMessage(result: ExecResult): string {
 }
 
 function contractSummary(contract: ProjectContract): string {
-  const functions = contract.functions.map((fn) => `- ${fn.name}(${fn.parameters.join(", ")})`).join("\n");
+  const functions = contract.functions.map((fn) => [
+    `- ${fn.name}(${fn.parameters.join(", ")}): ${fn.purpose ?? "legacy behavior unspecified"}`,
+    ...(fn.requirements ?? []).map((requirement) => `  - ${requirement}`),
+  ].join("\n")).join("\n");
   const constants = Object.entries(contract.constants)
     .map(([name, value]) => `- ${name} = ${JSON.stringify(value)}`)
     .join("\n") || "- none";
@@ -669,7 +682,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       name: "evaluate_r",
       label: "Evaluate temporary R code",
       description: "Transactionally evaluate bounded R code in the persistent read-only Bubblewrap worker. Failed calls roll back; successful calls retain only explicitly named objects.",
-      promptSnippet: "Request every target explicitly and retain only objects needed by later calls; all other assignments are discarded",
+      promptSnippet: "targets loads existing pipeline artifacts; retain preserves successful assignment names. Return a named list or vector as the final expression instead of printing, cbind, or formatted text",
       parameters: EVALUATE_SCHEMA,
       async execute(_toolCallId, params, signal, _onUpdate, context) {
         const operation = workerQueue.then(async () => {
@@ -693,7 +706,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
         workerQueue = operation.then(() => undefined, () => undefined);
         try {
           const result = await operation;
-          const { objects: _liveInventory, ...modelResult } = result;
+          const {
+            objects: _liveInventory,
+            value: _duplicateValue,
+            preview: _duplicatePreview,
+            previewTruncated: _duplicatePreviewTruncated,
+            ...modelResult
+          } = result;
           return { content: [{ type: "text", text: boundedJson(modelResult) }], details: result };
         } catch (error) {
           if (state) {
@@ -904,7 +923,38 @@ export default function piRExtension(pi: ExtensionAPI): void {
           }, signal);
           const remaining = await worker?.invalidateTargets().catch(() => undefined);
           if (remaining) updateLiveWorker(remaining, liveTransientStateLost, "targets-invalidated");
-          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+          const reachable = new Set<string>();
+          const includeUpstream = (name: string): void => {
+            if (reachable.has(name)) return;
+            reachable.add(name);
+            const declaration = contract.targets.find((target) => target.name === name);
+            if (!declaration) return;
+            for (const argument of Object.values(declaration.arguments)) {
+              if ("target" in argument) includeUpstream(argument.target);
+            }
+          };
+          names.forEach(includeUpstream);
+          const checks = contract.targets.flatMap((target) => {
+            if (!reachable.has(target.name) || isSourceFileTarget(target)) return [];
+            const fn = contract.functions.find((candidate) => candidate.name === target.function)!;
+            return [{
+              target: target.name,
+              function: fn.name,
+              artifact: target.artifact,
+              purpose: fn.purpose ?? null,
+              requirements: fn.requirements ?? [],
+              behaviorSpecified: typeof fn.purpose === "string" && (fn.requirements?.length ?? 0) > 0,
+            }];
+          });
+          const verification = {
+            status: checks.every((check) => check.behaviorSpecified) ? "inspection-required" : "behavior-unspecified",
+            checks,
+            agentAction: checks.every((check) => check.behaviorSpecified)
+              ? "Inspect each current target artifact and compare it with every listed requirement before claiming implementation complete"
+              : "Do not infer missing behavior; ask the user to revise the legacy contract before claiming implementation complete",
+          };
+          const details = { ...result, verification };
+          return { content: [{ type: "text", text: boundedJson(details) }], details };
         } catch (error) {
           throw actionableToolError(error);
         }
@@ -1156,8 +1206,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: "r_contract_propose",
       label: "Propose R project contract",
-      description: "Validate and replace the complete ignored Project Contract draft in Design or Contract Revision Mode. Approved Functions declare signatures only and lock as fail-closed stubs. Ordinary targets call declared Approved Functions. Existing input files use source.constant and omit function/output; generated file outputs use output bindings. Does not write project source.",
-      promptSnippet: "Propose all project decisions once; Source File Targets use source.constant, package calls use Approved Function wrappers, and target names must differ from function names",
+      description: "Validate and replace the complete ignored Project Contract draft in Design or Contract Revision Mode. Approved Functions declare signatures, purpose, and user-approved behavioral requirements but never bodies. Locking creates fail-closed stubs. Source File Targets use source.constant and omit function/output; generated file outputs use output bindings. Does not write project source.",
+      promptSnippet: "Propose all project decisions once; every Approved Function needs evidence-backed requirements for missing values, duplicates, coding, cohort, and outputs where relevant",
       parameters: CONTRACT_PROPOSAL_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = proposalQueue.then(async () => {
@@ -1280,9 +1330,19 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const diff = prepared.diff.length <= 40_000
       ? prepared.diff
       : `${prepared.diff.slice(0, 40_000)}\n[formatted diff truncated]`;
+    const verification = {
+      status: "required",
+      requirements: prepared.behavior.requirements,
+      agentAction: "List freshness, run the narrowest downstream contracted targets, and inspect their bounded artifacts against every locked requirement",
+    };
     return {
-      content: [{ type: "text", text: `Formatted diff\n${diff}\n\nCommit: ${commitHash}` }],
-      details: { commitHash, diff, function: prepared.function, path: prepared.path },
+      content: [{ type: "text", text: boundedJson({
+        function: prepared.function,
+        path: prepared.path,
+        commitHash,
+        verification,
+      }) }],
+      details: { commitHash, diff, function: prepared.function, path: prepared.path, verification },
     };
   }
 
@@ -1302,8 +1362,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: INSPECT_TOOL,
       label: "Inspect Approved R function",
-      description: "Read one Approved Function with its signature and current source digest for a stale-safe scoped edit.",
-      promptSnippet: "Inspect an Approved Function immediately before calling r_function_edit with the returned sourceHash",
+      description: "Read up to 20 Approved Functions with signatures, locked behavior, source, and current digests. Inspection is one coherent read; scoped edits remain internally serialized.",
+      promptSnippet: "Inspect all requested functions together; before editing, use the returned sourceHash and do not repeat bodies or hashes in prose",
       parameters: INSPECT_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = editQueue.then(async () => {
@@ -1316,14 +1376,14 @@ export default function piRExtension(pi: ExtensionAPI): void {
           if (dirty.stdout.trim()) {
             throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
           }
-          const input = params as { function?: unknown };
-          return inspectApprovedFunction(state.projectRoot, input?.function);
+          const input = params as { functions?: unknown };
+          return { functions: await inspectApprovedFunctions(state.projectRoot, input?.functions) };
         });
         editQueue = operation.then(() => undefined, () => undefined);
         try {
           const inspection = await operation;
           return {
-            content: [{ type: "text", text: `${inspection.signature}\nSource-Hash: ${inspection.sourceHash}\n\n${inspection.source}` }],
+            content: [{ type: "text", text: boundedJson(inspection) }],
             details: inspection,
           };
         } catch (error) {
@@ -1334,8 +1394,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: EDIT_TOOL,
       label: "Edit Approved R function body",
-      description: "Replace one Approved Function body. Pass only its inner R statements: no repeated outer Approved Function declaration and no outer braces. pi-r wraps, formats, validates, and commits them. Governed package functions are called without :: namespace operators.",
-      promptSnippet: "Inspect immediately before editing, then pass only inner body statements with the current sha256 digest; do not repeat the outer Approved Function declaration or braces and do not use ::",
+      description: "Replace one Approved Function body under its locked purpose and requirements. Legacy functions without requirements cannot be edited. Pass only inner R statements: pi-r serializes edits, wraps, formats, validates, and commits each one. Governed package functions are called without :: namespace operators.",
+      promptSnippet: "Act without repeating the body or hash in prose: use the inspected digest, implement only locked requirements, pass inner statements, and do not use ::",
       parameters: EDIT_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = editQueue.then(() => applyScopedEdit(params, context));
@@ -1908,7 +1968,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
       const previous = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
       for (const fn of contract.functions) {
         const prior = previous.functions.find((candidate) => candidate.name === fn.name);
-        if (prior && JSON.stringify(prior.parameters) === JSON.stringify(fn.parameters)) {
+        if (
+          prior &&
+          JSON.stringify(prior.parameters) === JSON.stringify(fn.parameters) &&
+          prior.purpose === fn.purpose &&
+          JSON.stringify(prior.requirements) === JSON.stringify(fn.requirements)
+        ) {
           const path = `R/${fn.name}.R`;
           files.set(path, await readFile(resolve(state.projectRoot, path), "utf8"));
         }
@@ -2076,9 +2141,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const proposal = state.phase !== "implementation"
       ? " Use r_contract_propose to create or revise the single Project Contract draft. Approved Functions declare signatures only and lock as fail-closed stubs. Existing input files are Source File Targets using source.constant; generated files use output bindings."
       : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
-    const exploration = " Use r_data_inspect for paginated schema, selected-column summaries, key cardinality, and overlap before targets exist. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
+    const exploration = " Use r_data_inspect for paginated schema, selected-column summaries (selected[].top contains bounded value/count entries and topComplete says whether all values are present), key cardinality, and overlap before targets exist. In evaluate_r, targets means existing pipeline artifacts to load and retain means successful assignment names to preserve; return a named structured value as the final expression instead of using cat, print, cbind, matrices, or formatted text. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
     const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
-    const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. Stay in the current mode when authority is sufficient. A topology change in Implementation Mode requires the user-only /r revise command: state that once, do not call unavailable proposal tools, and wait. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. Answer confirmation questions directly before constructing detailed payloads.";
+    const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. Stay in the current mode when authority is sufficient. A topology change in Implementation Mode requires the user-only /r revise command: state that once, do not call unavailable proposal tools, and wait. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. Answer confirmation questions directly before constructing detailed payloads. For implementation requests, do not narrate or repeat complete candidate bodies, source hashes, or tool payloads before acting: inspect, resolve only blocking uncertainty, then call the scoped tool. Keep progress text to at most two concise sentences.";
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active (runtime ${PI_R_RUNTIME_VERSION}). Use only the active compact tools within: ${roots}. Current trusted pi-r guidance: ${currentGuidance}. Do not use remembered Nix-store guidance paths from another runtime. Do not request shell or general mutation tools.${currentStateRule}${routing}${proposal}${exploration}`,
     };

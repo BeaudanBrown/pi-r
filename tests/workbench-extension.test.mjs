@@ -29,7 +29,20 @@ function proposalForContract(contract) {
     policyVersion: _policyVersion,
     ...withoutVersions
   } = contract;
-  return { ...withoutVersions, project: { name: contract.project.name } };
+  return {
+    ...withoutVersions,
+    project: { name: contract.project.name },
+    functions: contract.functions.map((fn) => ({
+      ...fn,
+      purpose: fn.purpose ?? `Test purpose for ${fn.name}`,
+      requirements: fn.requirements ?? ["Return a deterministic value matching the declared target artifact"],
+    })),
+  };
+}
+
+async function inspectFunction(tool, id, name, ctx) {
+  const result = await tool.execute(id, { functions: [name] }, undefined, undefined, ctx);
+  return { ...result, details: result.details.functions[0] };
 }
 
 async function targetOperationsContract() {
@@ -40,8 +53,8 @@ async function targetOperationsContract() {
     deliverables: [{ target: "answer", path: "artifacts/answer.txt" }],
     constants: { seed: 41, output_path: "artifacts/answer.txt", source_path: "analysis.R" },
     functions: [
-      { name: "write_answer", parameters: ["seed", "output_path"] },
-      { name: "fail_target", parameters: ["answer", "source_path"] },
+      { name: "write_answer", parameters: ["seed", "output_path"], purpose: "Write the approved answer file", requirements: ["Write seed plus one and return output_path"] },
+      { name: "fail_target", parameters: ["answer", "source_path"], purpose: "Exercise failed target diagnostics", requirements: ["Attempt to write only source_path"] },
     ],
     targets: [
       {
@@ -69,7 +82,7 @@ async function tableArtifactProject() {
     dependencies: ["data.table"],
     constants: { seed: 10 },
     functions: [
-      { name: "make_table", parameters: ["seed"] },
+      { name: "make_table", parameters: ["seed"], purpose: "Create the fixture table", requirements: ["Return two rows keyed by value"] },
       { name: "make_object", parameters: ["seed"] },
     ],
     targets: [
@@ -114,7 +127,7 @@ async function tableArtifactProject() {
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
     version: 2,
-    runtimeVersion: "0.19.0",
+    runtimeVersion: "0.20.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -276,7 +289,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     { block: true, reason: "pi-r read path is outside approved read-only roots" },
   );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.19\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.20\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -450,7 +463,12 @@ test("design mode profiles selected raw columns, paginated schema, and key overl
   }, undefined, undefined, ctx);
   assert.equal(result.details.rows, 3);
   assert.deepEqual(result.details.schema.items.map((column) => column.name), ["group", "value", "id"]);
-  assert.equal(result.details.selected.find((column) => column.name === "value").missing, 1);
+  const valueSummary = result.details.selected.find((column) => column.name === "value");
+  assert.equal(valueSummary.missing, 1);
+  assert.equal(valueSummary.blank, 0);
+  const groupSummary = result.details.selected.find((column) => column.name === "group");
+  assert.equal(groupSummary.topComplete, true);
+  assert.deepEqual(groupSummary.top.map((entry) => entry.value), ["a", "b", "c"]);
   assert.equal(result.details.key.unique, 2);
   assert.equal(result.details.key.duplicateRows, 1);
   assert.equal(result.details.overlap.uniqueIntersection, 1);
@@ -533,7 +551,7 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(first.details.error, null);
   assert.equal(first.details.worker.started, true);
   assert.equal(first.details.worker.environment, "design");
-  assert.doesNotMatch(first.content[0].text, /"objects"/);
+  assert.doesNotMatch(first.content[0].text, /"objects"|"preview"|"previewTruncated"|"value"\s*:/);
   const liveAfterFirst = await h.handlers.get("context")({ messages: [] }, ctx);
   const firstSnapshot = currentState(liveAfterFirst.messages[0].content);
   assert.equal(firstSnapshot.worker.state, "running");
@@ -581,6 +599,25 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(unicode.details.result.valuesTruncated, true);
   const unicodeBytes = Buffer.byteLength(unicode.details.result.values[0]);
   assert.ok(unicodeBytes <= 500, `bounded Unicode summary used ${unicodeBytes} bytes, ${unicode.details.result.values[0].length} UTF-16 units, ${[...unicode.details.result.values[0]].length} code points, prefix ${JSON.stringify(unicode.details.result.values[0].slice(0, 40))}`);
+  const matrix = await evaluate.execute("structured-matrix", {
+    code: "matrix(c('a', 'b', 'c', 'd'), nrow = 2L, dimnames = list(c('row1', 'row2'), c('left', 'right')))",
+    targets: [],
+    retain: [],
+  }, undefined, undefined, ctx);
+  assert.equal(matrix.details.result.kind, "matrix");
+  assert.deepEqual(matrix.details.result.dimensions, [2, 2]);
+  assert.deepEqual(matrix.details.result.cells[0], { index: [1, 1], labels: ["row1", "left"], value: "a" });
+  const frequencies = await evaluate.execute("structured-table", {
+    code: "table(c('known', 'missing', 'known'))",
+    targets: [],
+    retain: [],
+  }, undefined, undefined, ctx);
+  assert.equal(frequencies.details.result.kind, "frequency-table");
+  assert.deepEqual(frequencies.details.result.entries, [
+    { value: "known", count: 2 },
+    { value: "missing", count: 1 },
+  ]);
+  assert.equal(frequencies.details.result.complete, true);
 
   await evaluate.execute("bounded-live-state", {
     code: Array.from({ length: 60 }, (_, index) => `object_${index + 1} <- ${index + 1}L`).join("\n"),
@@ -766,7 +803,12 @@ test("Source File Target authority rejects canonical output aliases and post-loc
     project: { name: "collision" },
     dependencies: [],
     constants: { source_path: "real/input.csv", output_path: "alias/input.csv" },
-    functions: [{ name: "write_copy", parameters: ["source", "output_path"] }],
+    functions: [{
+      name: "write_copy",
+      parameters: ["source", "output_path"],
+      purpose: "Copy one approved source file to one approved output",
+      requirements: ["Write only output_path and return that exact path"],
+    }],
     targets: [
       { name: "source_file", artifact: "file", arguments: {}, source: { constant: "source_path" } },
       {
@@ -826,7 +868,7 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
   const edit = h.tools.find((tool) => tool.name === "r_function_edit");
   assert.deepEqual(edit.parameters.required, ["function", "expectedSourceHash", "statements"]);
   assert.equal(edit.parameters.properties.operation, undefined);
-  const inspected = await inspect.execute("inspect", { function: "load_input" }, undefined, undefined, ctx);
+  const inspected = await inspectFunction(inspect, "inspect", "load_input", ctx);
   await assert.rejects(
     edit.execute("invalid-shape", {
       function: "load_input",
@@ -860,7 +902,12 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
 
   const revised = structuredClone(proposalForContract(original));
   revised.constants.revision_seed = 1;
-  revised.functions.push({ name: "make_revision_value", parameters: ["seed"] });
+  revised.functions.push({
+    name: "make_revision_value",
+    parameters: ["seed"],
+    purpose: "Create the approved revision fixture value",
+    requirements: ["Return seed unchanged"],
+  });
   revised.targets.push({
     name: "revision_value",
     function: "make_revision_value",
@@ -947,7 +994,7 @@ test("locking restarts exploration in the generated environment with canonical g
 
   const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
-  const inspected = await inspectTool.execute("inspect-load", { function: "load_input" }, undefined, undefined, ctx);
+  const inspected = await inspectFunction(inspectTool, "inspect-load", "load_input", ctx);
   await editTool.execute("implement-load", {
     function: "load_input",
     expectedSourceHash: inspected.details.sourceHash,
@@ -1218,7 +1265,7 @@ test("target execution requires explicit contracted names and stores complete lo
   ]) {
     const inspectTool = h.tools.find((tool) => tool.name === "r_function_inspect");
     const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
-    const inspected = await inspectTool.execute(`inspect-${name}`, { function: name }, undefined, undefined, ctx);
+    const inspected = await inspectFunction(inspectTool, `inspect-${name}`, name, ctx);
     await editTool.execute(`edit-${name}`, {
       function: name,
       expectedSourceHash: inspected.details.sourceHash,
@@ -1230,6 +1277,9 @@ test("target execution requires explicit contracted names and stores complete lo
   const result = await runTargets.execute("run-answer", { names: ["answer"], all: false }, undefined, undefined, ctx);
   assert.equal(result.details.status, "succeeded", JSON.stringify(result.details));
   assert.deepEqual(result.details.requested, ["answer"]);
+  assert.equal(result.details.verification.status, "inspection-required");
+  assert.deepEqual(result.details.verification.checks[0].requirements, ["Write seed plus one and return output_path"]);
+  assert.match(result.details.verification.agentAction, /Inspect each current target artifact/);
   assert.equal(await readFile(join(root, "artifacts/answer.txt"), "utf8"), "42\n");
   assert.match(await readFile(result.details.logPath, "utf8"), /operation=run[\s\S]*answer/);
   const refreshed = await h.tools.find((tool) => tool.name === "r_targets_list")
@@ -1251,8 +1301,12 @@ test("target execution requires explicit contracted names and stores complete lo
   assert.equal(await git(root, "rev-parse", "HEAD"), head);
   assert.equal(await git(root, "status", "--porcelain", "--untracked-files=no"), "");
 
-  const functionInspection = await h.tools.find((tool) => tool.name === "r_function_inspect")
-    .execute("inspect-write-answer-revision", { function: "write_answer" }, undefined, undefined, ctx);
+  const functionInspection = await inspectFunction(
+    h.tools.find((tool) => tool.name === "r_function_inspect"),
+    "inspect-write-answer-revision",
+    "write_answer",
+    ctx,
+  );
   await h.tools.find((tool) => tool.name === "r_function_edit").execute("revise-write-answer", {
     function: "write_answer",
     expectedSourceHash: functionInspection.details.sourceHash,
@@ -1369,7 +1423,17 @@ test("table artifact inspection returns structure and summaries without rows and
 
   const functionTool = h.tools.find((tool) => tool.name === "r_function_inspect");
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
-  const functionState = await functionTool.execute("inspect-maker", { function: "make_table" }, undefined, undefined, ctx);
+  const functionState = await inspectFunction(functionTool, "inspect-maker", "make_table", ctx);
+  assert.equal(functionState.details.behavior.specified, true);
+  assert.match(functionState.details.behavior.requirements[0], /two rows keyed by value/);
+  const legacyState = await inspectFunction(functionTool, "inspect-legacy-maker", "make_object", ctx);
+  assert.equal(legacyState.details.behavior.specified, false);
+  assert.match(legacyState.details.behavior.agentAction, /ask the user/i);
+  await assert.rejects(editTool.execute("reject-legacy-maker", {
+    function: "make_object",
+    expectedSourceHash: legacyState.details.sourceHash,
+    operation: { kind: "replace", body: "{\nlist(value = seed)\n}" },
+  }, undefined, undefined, ctx), /BEHAVIOR_UNSPECIFIED/);
   await editTool.execute("replace-maker", {
     function: "make_table",
     expectedSourceHash: functionState.details.sourceHash,
@@ -1406,8 +1470,12 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.ok(inspectTool, "Implementation Mode must expose Approved Function inspection");
   assert.ok(editTool, "Implementation Mode must expose its scoped body editing capability");
   const path = join(root, "R/load_input.R");
-  const inspected = await inspectTool.execute("inspect-1", { function: "load_input" }, undefined, undefined, ctx);
-  assert.match(inspected.content[0].text, /load_input <- function\(path\)[\s\S]*Source-Hash: sha256:/);
+  const inspected = await inspectFunction(inspectTool, "inspect-1", "load_input", ctx);
+  assert.match(inspected.content[0].text, /"signature": "load_input <- function\(path\)"[\s\S]*"sourceHash": "sha256:/);
+  assert.equal(inspected.details.behavior.specified, true);
+  assert.equal(inspected.details.behavior.purpose, "Load the approved input table");
+  const batch = await inspectTool.execute("inspect-batch", { functions: ["load_input", "make_config"] }, undefined, undefined, ctx);
+  assert.deepEqual(batch.details.functions.map((entry) => entry.function), ["load_input", "make_config"]);
   const headBefore = await git(root, "rev-parse", "HEAD");
 
   const result = await editTool.execute("edit-1", {
@@ -1424,7 +1492,9 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.match(committed, /^load_input <- function\(path\)/);
   assert.match(committed, /identity_local <- function/);
   assert.match(committed, /function\(item\)/);
-  assert.match(result.content[0].text, /Formatted diff[\s\S]*Commit: [0-9a-f]{40}/);
+  assert.doesNotMatch(result.content[0].text, /diff --pi-r/);
+  assert.match(result.content[0].text, /"verification"[\s\S]*"status": "required"/);
+  assert.match(result.details.diff, /diff --pi-r/);
   assert.equal(result.details.commitHash, await git(root, "rev-parse", "HEAD"));
   assert.equal(h.appended.at(-1).data.head, result.details.commitHash);
   assert.match(
@@ -1436,7 +1506,7 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);
 
-  const patchInspection = await inspectTool.execute("inspect-2", { function: "load_input" }, undefined, undefined, ctx);
+  const patchInspection = await inspectFunction(inspectTool, "inspect-2", "load_input", ctx);
   const patchHead = await git(root, "rev-parse", "HEAD");
   await editTool.execute("edit-2", {
     function: "load_input",
@@ -1460,7 +1530,7 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
   const path = join(root, "R/load_input.R");
   const original = await readFile(path, "utf8");
-  const digest = (await inspectTool.execute("inspect", { function: "load_input" }, undefined, undefined, ctx)).details.sourceHash;
+  const digest = (await inspectFunction(inspectTool, "inspect", "load_input", ctx)).details.sourceHash;
   const head = await git(root, "rev-parse", "HEAD");
   const forbiddenBodies = [
     ["library(pkg)", /POLICY_VIOLATION.*library/],
@@ -1534,7 +1604,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.19\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.20\.0.*fresh Pi session/i);
   assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
   const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);

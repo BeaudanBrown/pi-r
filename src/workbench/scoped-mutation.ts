@@ -28,6 +28,12 @@ export interface ApprovedFunctionInspection {
   signature: string;
   source: string;
   sourceHash: string;
+  behavior: {
+    specified: boolean;
+    purpose: string | null;
+    requirements: string[];
+    agentAction: string;
+  };
 }
 
 export interface PreparedScopedMutation {
@@ -40,6 +46,7 @@ export interface PreparedScopedMutation {
   original: string;
   path: string;
   policyVersion: string;
+  behavior: ApprovedFunctionInspection["behavior"];
 }
 
 function sha256(content: string): string {
@@ -139,23 +146,22 @@ function formattedDiff(path: string, original: string, candidate: string): strin
   return `diff --pi-r ${path}\n--- committed/${path}\n+++ formatted/${path}\n${[...removed, ...added].join("\n")}`;
 }
 
-export async function inspectApprovedFunction(
+export async function inspectApprovedFunctions(
   projectRoot: string,
-  functionName: unknown,
-): Promise<ApprovedFunctionInspection> {
-  if (typeof functionName !== "string" || !functionName) {
-    throw new RecoverableError("INVALID_REQUEST", "Inspection requires an Approved Function name");
+  functionNames: unknown,
+): Promise<ApprovedFunctionInspection[]> {
+  if (
+    !Array.isArray(functionNames) ||
+    functionNames.length === 0 ||
+    functionNames.length > 20 ||
+    functionNames.some((name) => typeof name !== "string" || !name) ||
+    new Set(functionNames).size !== functionNames.length
+  ) {
+    throw new RecoverableError("INVALID_REQUEST", "Inspection requires between 1 and 20 unique Approved Function names");
   }
   const root = resolve(projectRoot);
   const contractText = await readFile(resolve(root, "pi-r.yml"), "utf8");
   const contract = validateContract(JSON.parse(contractText));
-  const approved = contract.functions.find((candidate) => candidate.name === functionName);
-  if (!approved) {
-    throw new RecoverableError(
-      "SCOPE_VIOLATION",
-      `Function '${functionName}' is not an Approved Function in the locked Project Contract`,
-    );
-  }
   const manifest = JSON.parse(await readFile(resolve(root, ".pi-r/manifest.json"), "utf8")) as {
     contractHash?: unknown;
     policyVersion?: unknown;
@@ -164,23 +170,55 @@ export async function inspectApprovedFunction(
   if (manifest.contractHash !== contractHash || manifest.policyVersion !== contract.policyVersion) {
     throw new RecoverableError("CONTRACT_DRIFT", "Project Contract provenance does not match the locked manifest");
   }
-  const path = `R/${approved.name}.R`;
-  const source = await readFile(resolve(root, path), "utf8");
-  return {
-    contractHash,
-    contractVersion: contract.contractVersion,
-    function: approved.name,
-    path,
-    policyVersion: contract.policyVersion,
-    signature: `${approved.name} <- function(${approved.parameters.join(", ")})`,
-    source,
-    sourceHash: sha256(source),
-  };
+  return Promise.all(functionNames.map(async (functionName) => {
+    const approved = contract.functions.find((candidate) => candidate.name === functionName);
+    if (!approved) {
+      throw new RecoverableError(
+        "SCOPE_VIOLATION",
+        `Function '${functionName}' is not an Approved Function in the locked Project Contract`,
+      );
+    }
+    const path = `R/${approved.name}.R`;
+    const source = await readFile(resolve(root, path), "utf8");
+    const specified = typeof approved.purpose === "string" && (approved.requirements?.length ?? 0) > 0;
+    return {
+      contractHash,
+      contractVersion: contract.contractVersion,
+      function: approved.name,
+      path,
+      policyVersion: contract.policyVersion,
+      signature: `${approved.name} <- function(${approved.parameters.join(", ")})`,
+      source,
+      sourceHash: sha256(source),
+      behavior: {
+        specified,
+        purpose: approved.purpose ?? null,
+        requirements: approved.requirements ?? [],
+        agentAction: specified
+          ? "Implement only the locked purpose and requirements"
+          : "Legacy behavior is unspecified; ask the user for requirements before inventing domain rules",
+      },
+    };
+  }));
+}
+
+export async function inspectApprovedFunction(
+  projectRoot: string,
+  functionName: unknown,
+): Promise<ApprovedFunctionInspection> {
+  return (await inspectApprovedFunctions(projectRoot, [functionName]))[0];
 }
 
 export async function prepareScopedMutation(projectRoot: string, input: unknown): Promise<PreparedScopedMutation> {
   const request = validateRequest(input);
   const inspection = await inspectApprovedFunction(projectRoot, request.function);
+  if (!inspection.behavior.specified) {
+    throw new RecoverableError(
+      "BEHAVIOR_UNSPECIFIED",
+      `Approved Function '${inspection.function}' belongs to a legacy contract without locked behavioral requirements`,
+      { agentAction: "Do not invent domain rules; ask the user to enter /r revise and approve purpose and requirements" },
+    );
+  }
   const path = resolve(projectRoot, inspection.path);
   const original = inspection.source;
   if (inspection.sourceHash !== request.expectedSourceHash) {
@@ -213,5 +251,6 @@ export async function prepareScopedMutation(projectRoot: string, input: unknown)
     original,
     path: inspection.path,
     policyVersion: inspection.policyVersion,
+    behavior: inspection.behavior,
   };
 }

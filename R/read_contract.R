@@ -11,6 +11,7 @@ contract <- yaml::read_yaml(args[[1L]], eval.expr = FALSE)
 contract$dependencies <- as_sequence(contract$dependencies)
 contract$functions <- lapply(as_sequence(contract$functions), function(definition) {
   definition$parameters <- as_sequence(definition$parameters)
+  if (!is.null(definition$requirements)) definition$requirements <- as_sequence(definition$requirements)
   definition
 })
 contract$targets <- lapply(as_sequence(contract$targets), function(definition) {

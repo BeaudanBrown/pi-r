@@ -16,6 +16,8 @@ export interface NixpkgsPin {
 export interface ApprovedFunction {
   name: string;
   parameters: string[];
+  purpose?: string;
+  requirements?: string[];
 }
 
 export type ArgumentReference = { target: string } | { constant: string };
