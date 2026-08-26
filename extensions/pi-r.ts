@@ -29,7 +29,7 @@ import { scoutDependencies, type DependencyScoutRequest } from "../src/workbench
 const STATE_ENTRY = "pi-r-workbench-state";
 const WORKBENCH_BRANCH = "pi-r/workbench";
 const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
-const WORKER_TOOLS = ["evaluate_r", "r_worker_status", "r_worker_reset"] as const;
+const WORKER_TOOLS = ["evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset"] as const;
 const TARGET_TOOLS = ["r_targets_list", "r_targets_run", "r_target_workspace"] as const;
 const ARTIFACT_TOOL = "r_artifact_inspect";
 const DATA_TOOL = "r_data_inspect";
@@ -78,10 +78,22 @@ const DATA_SCHEMA = {
 const EVALUATE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["code", "targets"],
+  required: ["code", "targets", "retain"],
   properties: {
     code: { type: "string", minLength: 1, maxLength: 50_000 },
     targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
+    retain: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
+  },
+} as const;
+const OBJECT_INSPECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["name", "columns", "columnOffset", "columnLimit"],
+  properties: {
+    name: { type: "string", pattern: MODEL_R_NAME_PATTERN },
+    columns: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+    columnOffset: { type: "integer", minimum: 0, maximum: 10000 },
+    columnLimit: { type: "integer", minimum: 1, maximum: 50 },
   },
 } as const;
 const EMPTY_SCHEMA = { type: "object", additionalProperties: false, properties: {} } as const;
@@ -480,6 +492,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
       origin: object.origin,
       class: object.class.slice(0, 8).map((name) => name.slice(0, 200)),
       bytes: object.bytes,
+      ...(object.createdByCall !== undefined ? { createdByCall: object.createdByCall } : {}),
+      ...(object.lastModifiedByCall !== undefined ? { lastModifiedByCall: object.lastModifiedByCall } : {}),
     }));
     const agentDuty = state.phase === "design"
       ? "contract_design"
@@ -650,17 +664,17 @@ export default function piRExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: "evaluate_r",
       label: "Evaluate temporary R code",
-      description: "Evaluate bounded temporary R code in the persistent read-only Bubblewrap worker, loading only named targets.",
-      promptSnippet: "Explore with temporary assignments; request every target explicitly by its canonical name",
+      description: "Transactionally evaluate bounded R code in the persistent read-only Bubblewrap worker. Failed calls roll back; successful calls retain only explicitly named objects.",
+      promptSnippet: "Request every target explicitly and retain only objects needed by later calls; all other assignments are discarded",
       parameters: EVALUATE_SCHEMA,
       async execute(_toolCallId, params, signal, _onUpdate, context) {
         const operation = workerQueue.then(async () => {
           await assertWorkerProvenance(context);
           const environment: WorkerEnvironment = state?.phase === "implementation" ? "project" : "design";
           const runtime = await workerRuntime(environment);
-          const input = params as { code?: unknown; targets?: unknown };
+          const input = params as { code?: unknown; targets?: unknown; retain?: unknown };
           const result = await workerInstance().evaluate(
-            { code: input.code as string, targets: input.targets as string[] },
+            { code: input.code as string, targets: input.targets as string[], retain: input.retain as string[] },
             environment,
             runtime,
             signal,
@@ -687,6 +701,25 @@ export default function piRExtension(pi: ExtensionAPI): void {
       },
     });
     pi.registerTool({
+      name: "r_object_inspect",
+      label: "Inspect retained R object",
+      description: "Inspect bounded structure and selected-column summaries for one worker-held object without reevaluating or returning rows.",
+      promptSnippet: "Inspect retained objects instead of rereading source files or writing formatting code",
+      parameters: OBJECT_INSPECT_SCHEMA,
+      async execute(_toolCallId, params, _signal, _onUpdate, context) {
+        await assertWorkerProvenance(context);
+        const input = params as { name?: unknown; columns?: unknown; columnOffset?: unknown; columnLimit?: unknown };
+        const result = await workerInstance().inspectObject({
+          name: input.name as string,
+          columns: input.columns as string[],
+          columnOffset: input.columnOffset as number,
+          columnLimit: input.columnLimit as number,
+        });
+        updateLiveWorker(result.objects, liveTransientStateLost, "object-inspected");
+        return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+      },
+    });
+    pi.registerTool({
       name: "r_worker_status",
       label: "Inspect temporary R state",
       description: "List current worker objects and approximate sizes without starting a worker.",
@@ -698,6 +731,19 @@ export default function piRExtension(pi: ExtensionAPI): void {
           : { state: "stopped" as const, objects: [], transientStateLost: liveTransientStateLost };
         updateLiveWorker(status.objects, status.transientStateLost);
         return { content: [{ type: "text", text: boundedJson(status) }], details: status };
+      },
+    });
+    pi.registerTool({
+      name: "r_worker_clear",
+      label: "Clear temporary R objects",
+      description: "Remove only retained temporary worker objects while preserving generated project globals, loaded target context, and the targets cache.",
+      parameters: EMPTY_SCHEMA,
+      async execute(_toolCallId, _params, _signal, _onUpdate, context) {
+        await assertWorkerProvenance(context);
+        const result = worker ? await worker.clearTemporary() : { removed: [], objects: [] };
+        updateLiveWorker(result.objects, liveTransientStateLost, "temporaries-cleared");
+        if (state) showHud(context, state);
+        return { content: [{ type: "text", text: boundedJson(result) }], details: result };
       },
     });
     pi.registerTool({

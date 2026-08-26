@@ -14,15 +14,20 @@ export interface WorkerObject {
   bytes: number;
   class: string[];
   origin: "temporary" | "target" | "global";
+  createdByCall?: number;
+  lastModifiedByCall?: number;
 }
 
 export interface EvaluateRRequest {
   code: string;
   targets: string[];
+  retain: string[];
 }
 
 export interface EvaluateRResult {
   value: unknown;
+  result: unknown;
+  stateDelta: { committed: string[]; discarded: string[]; rolledBack: boolean };
   preview: string;
   previewTruncated: boolean;
   warnings: string[];
@@ -37,6 +42,11 @@ interface WorkerResponse {
   value?: unknown;
   preview?: unknown;
   previewTruncated?: unknown;
+  result?: unknown;
+  stateDelta?: unknown;
+  removed?: unknown;
+  name?: unknown;
+  summary?: unknown;
   warnings?: unknown;
   messages?: unknown;
   error?: unknown;
@@ -105,6 +115,8 @@ function objects(value: unknown): WorkerObject[] {
       bytes: Math.max(0, Math.trunc(candidate.bytes)),
       class: stringArray(candidate.class).slice(0, 8).map((name) => name.slice(0, 200)),
       origin: candidate.origin === "temporary" ? "temporary" : candidate.origin === "target" ? "target" : "global",
+      ...(typeof candidate.createdByCall === "number" && Number.isInteger(candidate.createdByCall) ? { createdByCall: candidate.createdByCall } : {}),
+      ...(typeof candidate.lastModifiedByCall === "number" && Number.isInteger(candidate.lastModifiedByCall) ? { lastModifiedByCall: candidate.lastModifiedByCall } : {}),
     }];
   });
 }
@@ -142,17 +154,27 @@ export class SandboxedRWorker {
     rscript: string,
     signal?: AbortSignal,
   ): Promise<EvaluateRResult> {
-    if (typeof request.code !== "string" || !Array.isArray(request.targets) || request.targets.some((name) => typeof name !== "string")) {
-      throw new RecoverableError("INVALID_REQUEST", "evaluate_r requires code and an array of canonical target names");
+    if (
+      typeof request.code !== "string" ||
+      !Array.isArray(request.targets) || request.targets.some((name) => typeof name !== "string") ||
+      !Array.isArray(request.retain) || request.retain.some((name) => typeof name !== "string")
+    ) {
+      throw new RecoverableError("INVALID_REQUEST", "evaluate_r requires code plus arrays of canonical target and retained-object names");
     }
     const started = await this.#ensureStarted(environment, rscript);
     const transientStateLost = this.#transientStateLost;
     this.#transientStateLost = false;
-    const response = await this.#request({ operation: "evaluate", code: request.code, targets: request.targets }, signal);
+    const response = await this.#request({ operation: "evaluate", code: request.code, targets: request.targets, retain: request.retain }, signal);
+    const result = response.result ?? null;
+    const stateDelta = response.stateDelta && typeof response.stateDelta === "object"
+      ? response.stateDelta as EvaluateRResult["stateDelta"]
+      : { committed: [], discarded: [], rolledBack: response.error != null };
     return {
       value: response.value ?? null,
-      preview: typeof response.preview === "string" ? response.preview : "",
-      previewTruncated: response.previewTruncated === true,
+      result,
+      stateDelta,
+      preview: JSON.stringify(result),
+      previewTruncated: false,
       warnings: stringArray(response.warnings),
       messages: stringArray(response.messages),
       error: response.error && typeof response.error === "object" ? response.error as EvaluateRResult["error"] : null,
@@ -183,6 +205,27 @@ export class SandboxedRWorker {
       objects: objects(response.objects),
       worker: { started, transientStateLost },
     };
+  }
+
+  async inspectObject(
+    request: { name: string; columns: string[]; columnOffset: number; columnLimit: number },
+  ): Promise<{ name: string; summary: unknown; error: unknown; objects: WorkerObject[] }> {
+    if (!this.#child || this.#state !== "running") {
+      throw new RecoverableError("WORKER_STOPPED", "No running worker contains objects to inspect");
+    }
+    const response = await this.#request({ operation: "inspect", ...request });
+    return {
+      name: typeof response.name === "string" ? response.name : request.name,
+      summary: response.result ?? response.summary ?? null,
+      error: response.error ?? null,
+      objects: objects(response.objects),
+    };
+  }
+
+  async clearTemporary(): Promise<{ removed: string[]; objects: WorkerObject[] }> {
+    if (!this.#child || this.#state !== "running") return { removed: [], objects: [] };
+    const response = await this.#request({ operation: "clear_temporary" });
+    return { removed: stringArray(response.removed), objects: objects(response.objects) };
   }
 
   async invalidateTargets(): Promise<WorkerObject[]> {
@@ -272,6 +315,11 @@ export class SandboxedRWorker {
     if (process.env.PI_R_REAL_WORKER_SCRIPT) {
       args.push("--setenv", "PI_R_REAL_WORKER_SCRIPT", process.env.PI_R_REAL_WORKER_SCRIPT);
     }
+    const valueSummaryScript = process.env.PI_R_VALUE_SUMMARY_SCRIPT;
+    if (!valueSummaryScript || !isAbsolute(valueSummaryScript)) {
+      throw new RecoverableError("WORKER_START_FAILED", "Packaged value-summary runtime is unavailable");
+    }
+    args.push("--setenv", "PI_R_VALUE_SUMMARY_SCRIPT", valueSummaryScript);
     args.push(
       "--setenv", "HOME", "/tmp/pi-r-home",
       "--setenv", "TMPDIR", "/tmp",

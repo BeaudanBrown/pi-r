@@ -42,6 +42,7 @@
             cp ${./R/read_contract.R} $out/share/pi-r/R/read_contract.R
             cp ${./R/style_body.R} $out/share/pi-r/R/style_body.R
             cp ${./R/worker.R} $out/share/pi-r/R/worker.R
+            cp ${./R/value_summary.R} $out/share/pi-r/R/value_summary.R
             cp ${./R/target_runner.R} $out/share/pi-r/R/target_runner.R
             cp ${./R/artifact_inspector.R} $out/share/pi-r/R/artifact_inspector.R
             cp ${./R/data_inspector.R} $out/share/pi-r/R/data_inspector.R
@@ -96,6 +97,7 @@
                 --set PI_R_BWRAP "${pkgs.bubblewrap}/bin/bwrap" \
                 --set PI_R_WORKER_RSCRIPT "${rRuntime}/bin/Rscript" \
                 --set PI_R_WORKER_SCRIPT "${piResources}/share/pi-r/R/worker.R" \
+                --set PI_R_VALUE_SUMMARY_SCRIPT "${piResources}/share/pi-r/R/value_summary.R" \
                 --set PI_R_TARGET_RUNNER_SCRIPT "${piResources}/share/pi-r/R/target_runner.R" \
                 --set PI_R_ARTIFACT_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/artifact_inspector.R" \
                 --set PI_R_DATA_INSPECTOR_SCRIPT "${piResources}/share/pi-r/R/data_inspector.R" \
@@ -125,6 +127,7 @@
                 sandbox = "${pkgs.bubblewrap}/bin/bwrap";
                 inherit sandboxRuntimePath;
                 worker = "${piResources}/share/pi-r/R/worker.R";
+                valueSummary = "${piResources}/share/pi-r/R/value_summary.R";
                 targetRunner = "${piResources}/share/pi-r/R/target_runner.R";
                 artifactInspector = "${piResources}/share/pi-r/R/artifact_inspector.R";
                 dataInspector = "${piResources}/share/pi-r/R/data_inspector.R";
@@ -182,6 +185,7 @@
             test -x ${piR.resourcePaths.parserGrammar}
             test -f ${piR.resourcePaths.parserQuery}
             test -f ${piR.resourcePaths.worker}
+            test -f ${piR.resourcePaths.valueSummary}
             test -f ${piR.resourcePaths.targetRunner}
             test -f ${piR.resourcePaths.artifactInspector}
             test -f ${piR.resourcePaths.dataInspector}
@@ -232,6 +236,7 @@
               PI_R_WORKER_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_PROJECT_RSCRIPT=${rTestRuntime}/bin/Rscript \
               PI_R_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
+              PI_R_VALUE_SUMMARY_SCRIPT=${resources}/share/pi-r/R/value_summary.R \
               PI_R_REAL_WORKER_SCRIPT=${resources}/share/pi-r/R/worker.R \
               PI_R_NOISY_WORKER_SCRIPT=${./tests/fixtures/noisy-worker.R} \
               PI_R_TARGET_RUNNER_SCRIPT=${resources}/share/pi-r/R/target_runner.R \
