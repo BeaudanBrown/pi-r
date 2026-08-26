@@ -1453,6 +1453,11 @@ test("persisted workbench state resumes only when project and branch still match
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
   assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.18\.0.*fresh Pi session/i);
+  assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
+  const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
+  assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);
+  await stale.commands[0].options.handler("status", staleContext);
+  assert.match(staleContext.notifications.at(-1)[0], /resume blocked:.*incompatible/i);
 
   await git(root, "switch", "-qc", "other-branch");
   const mismatched = harness(entries);

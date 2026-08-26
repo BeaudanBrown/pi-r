@@ -455,6 +455,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let liveTransientStateLost = false;
   let liveTransition = "inactive";
   let previousCompletionTruncated = false;
+  let quarantineReason: string | undefined;
 
   function updateLiveWorker(objects: WorkerObject[], transientStateLost: boolean, transition?: string): void {
     const originOrder: Record<WorkerObject["origin"], number> = { temporary: 0, target: 1, global: 2 };
@@ -1070,6 +1071,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
   function enterPhase(next: WorkbenchState): void {
     previousActiveTools ??= pi.getActiveTools();
     const constrained = { ...next, allowedTools: phaseTools(next.phase) };
+    quarantineReason = undefined;
     state = constrained;
     pi.setActiveTools(constrained.allowedTools);
   }
@@ -1275,12 +1277,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
 
   function quarantine(context: CommandContext, message: string): void {
     previousActiveTools ??= pi.getActiveTools();
+    quarantineReason = message.slice(0, 2000);
     state = undefined;
     updateLiveWorker([], false, "inactive");
     pi.setActiveTools([]);
-    context.ui.setWidget?.("pi-r-hud", undefined);
+    context.ui.setWidget?.("pi-r-hud", ["pi-r RESUME BLOCKED", quarantineReason]);
     context.ui.setStatus?.("pi-r", "R:resume blocked");
-    context.ui.notify(message, "error");
+    context.ui.notify(quarantineReason, "error");
   }
 
   async function verifyState(candidate: WorkbenchState, context: CommandContext): Promise<string | undefined> {
@@ -1922,6 +1925,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", undefined);
     state = undefined;
+    quarantineReason = undefined;
   });
 
   pi.on("tool_call", async (event, context) => {
@@ -1987,7 +1991,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (!state) return undefined;
+    if (!state) {
+      if (!quarantineReason) return undefined;
+      return {
+        systemPrompt: `${event.systemPrompt}\n\npi-r is resume-blocked: ${quarantineReason}. No tools are available. Do not emit remembered tool calls or tool-call markup. Ask the operator to run /r start in a fresh session.`,
+      };
+    }
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const currentGuidance = (await guidanceRoots).join(", ");
     const proposal = state.phase !== "implementation"
@@ -2007,7 +2016,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       const [subcommand, ...rest] = words(args.trim());
       if (!subcommand || subcommand === "status") {
         if (!state) {
-          context.ui.notify("pi-r workbench is not active", "info");
+          context.ui.notify(quarantineReason ? `pi-r resume blocked: ${quarantineReason}` : "pi-r workbench is not active", quarantineReason ? "error" : "info");
           return;
         }
         const mismatch = await verifyState(state, context);
