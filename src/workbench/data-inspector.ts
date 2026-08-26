@@ -3,13 +3,30 @@ import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { RecoverableError } from "../r-edit/errors.js";
 import { sandboxRuntimePath } from "./sandbox.js";
 
+export interface DataInspectionRequest {
+  path: string;
+  columns: string[];
+  columnOffset: number;
+  columnLimit: number;
+  key?: string;
+  comparePath?: string;
+}
+
 export interface DataInspection {
   path: string;
   bytes?: number;
-  sampledRows?: number;
-  columns?: Array<{ name: string; class: string[]; missing: number }>;
-  head?: unknown;
-  truncated?: boolean;
+  rows?: number;
+  schema?: {
+    total: number;
+    offset: number;
+    returned: number;
+    nextOffset: number | null;
+    items: Array<{ name: string; class: string[] }>;
+  };
+  selected?: unknown[];
+  missingColumns?: string[];
+  key?: unknown;
+  overlap?: unknown;
   error?: { code: string; message: string; recoverable: true } | null;
 }
 
@@ -18,6 +35,7 @@ interface DataInspectorOptions {
   readOnlyRoots: string[];
   rscript: string;
   inspectorScript: string;
+  valueSummaryScript: string;
   bwrap?: string;
   sandboxPath?: string;
   timeoutMs?: number;
@@ -38,12 +56,12 @@ function directoryArguments(path: string): string[] {
 }
 
 export async function inspectData(
-  path: string,
-  maxRows: number,
+  request: DataInspectionRequest,
   options: DataInspectorOptions,
   signal?: AbortSignal,
 ): Promise<DataInspection> {
-  if (!isAbsolute(path) || !isAbsolute(options.rscript) || !isAbsolute(options.inspectorScript)) {
+  const runtimePaths = [request.path, options.rscript, options.inspectorScript, options.valueSummaryScript];
+  if (runtimePaths.some((path) => !isAbsolute(path)) || (request.comparePath && !isAbsolute(request.comparePath))) {
     throw new RecoverableError("DATA_INSPECTOR_START_FAILED", "Data inspector paths must be absolute");
   }
   const runtimePath = sandboxRuntimePath(options.sandboxPath);
@@ -62,13 +80,14 @@ export async function inspectData(
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LC_ALL", "C",
     "--setenv", "PATH", runtimePath,
+    "--setenv", "PI_R_VALUE_SUMMARY_SCRIPT", options.valueSummaryScript,
     "--chdir", options.projectRoot,
-    options.rscript, "--vanilla", options.inspectorScript, path, String(maxRows),
+    options.rscript, "--vanilla", options.inspectorScript,
   );
 
   return new Promise<DataInspection>((resolvePromise, rejectPromise) => {
     const child = spawn(options.bwrap ?? process.env.PI_R_BWRAP ?? "bwrap", args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: runtimePath },
     });
     let stdout = "";
@@ -117,5 +136,6 @@ export async function inspectData(
         rejectPromise(new RecoverableError("DATA_INSPECTOR_PROTOCOL_ERROR", "Raw data inspector returned invalid JSON", { stderrTail: stderr.trim() }));
       }
     });
+    child.stdin.end(`${JSON.stringify(request)}\n`);
   });
 }

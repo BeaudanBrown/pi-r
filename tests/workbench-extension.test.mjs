@@ -427,9 +427,12 @@ test("design mode gates model tools to reads inside approved roots", async () =>
   assert.equal((await gate({ toolName: "write", input: { path: join(root, "x") } }, ctx)).block, true);
 });
 
-test("design mode inspects bounded raw CSV data without requiring a target", async () => {
+test("design mode profiles selected raw columns, paginated schema, and key overlap without a target", async () => {
   const root = await repository();
-  await writeFile(join(root, "input.csv"), "group,value\na,1\nb,\n");
+  await writeFile(join(root, "input.csv"), "group,value,id\na,1,1\nb,,1\nc,3,2\n");
+  await writeFile(join(root, "comparison.csv"), "id\n2\n3\n");
+  const wideNames = Array.from({ length: 60 }, (_, index) => `column_${index + 1}`);
+  await writeFile(join(root, "wide.csv"), `${wideNames.join(",")}\n${wideNames.map(() => "1").join(",")}\n`);
   const outside = await mkdtemp(join(tmpdir(), "pi-r-data-outside-"));
   await writeFile(join(outside, "secret.csv"), "secret\n1\n");
   const h = harness();
@@ -437,12 +440,29 @@ test("design mode inspects bounded raw CSV data without requiring a target", asy
   await h.commands[0].options.handler("start", ctx);
   const inspect = h.tools.find((tool) => tool.name === "r_data_inspect");
   assert.ok(inspect);
-  const result = await inspect.execute("inspect-data", { path: "input.csv", maxRows: 100 }, undefined, undefined, ctx);
-  assert.equal(result.details.sampledRows, 2);
-  assert.deepEqual(result.details.columns.map((column) => column.name), ["group", "value"]);
-  assert.equal(result.details.columns.find((column) => column.name === "value").missing, 1);
+  const result = await inspect.execute("inspect-data", {
+    path: "input.csv",
+    columns: ["group", "value"],
+    key: "id",
+    comparePath: "comparison.csv",
+    columnOffset: 0,
+    columnLimit: 20,
+  }, undefined, undefined, ctx);
+  assert.equal(result.details.rows, 3);
+  assert.deepEqual(result.details.schema.items.map((column) => column.name), ["group", "value", "id"]);
+  assert.equal(result.details.selected.find((column) => column.name === "value").missing, 1);
+  assert.equal(result.details.key.unique, 2);
+  assert.equal(result.details.key.duplicateRows, 1);
+  assert.equal(result.details.overlap.uniqueIntersection, 1);
+  const wide = await inspect.execute("inspect-wide", {
+    path: "wide.csv", columns: [], columnOffset: 0, columnLimit: 50,
+  }, undefined, undefined, ctx);
+  assert.equal(wide.details.schema.total, 60);
+  assert.equal(wide.details.schema.items.length, 50);
+  assert.equal(wide.details.schema.nextOffset, 50);
+  assert.doesNotMatch(wide.content[0].text, /structured result truncated/);
   await assert.rejects(
-    inspect.execute("outside", { path: join(outside, "secret.csv") }, undefined, undefined, ctx),
+    inspect.execute("outside", { path: join(outside, "secret.csv"), columns: [], columnOffset: 0, columnLimit: 20 }, undefined, undefined, ctx),
     /DATA_PATH_OUTSIDE_ROOTS/,
   );
 });

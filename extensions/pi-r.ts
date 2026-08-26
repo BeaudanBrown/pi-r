@@ -68,10 +68,14 @@ const CONTRACT_PROPOSAL_SCHEMA = (() => {
 const DATA_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["path"],
+  required: ["path", "columns", "columnOffset", "columnLimit"],
   properties: {
     path: { type: "string", minLength: 1, maxLength: 500 },
-    maxRows: { type: "integer", minimum: 1, maximum: 1000 },
+    columns: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+    key: { type: "string", minLength: 1, maxLength: 200 },
+    comparePath: { type: "string", minLength: 1, maxLength: 500 },
+    columnOffset: { type: "integer", minimum: 0, maximum: 10000 },
+    columnLimit: { type: "integer", minimum: 1, maximum: 50 },
   },
 } as const;
 
@@ -935,40 +939,63 @@ export default function piRExtension(pi: ExtensionAPI): void {
     });
   }
 
+  async function canonicalDataPath(input: string): Promise<string> {
+    if (!state) throw new RecoverableError("INVALID_PHASE", "Raw data inspection requires an active Workbench Session");
+    const requested = isAbsolute(input) ? input : resolve(state.projectRoot, input.replace(/^@/, ""));
+    const canonical = await realpath(requested).catch(() => undefined);
+    const roots = [state.projectRoot, ...state.readOnlyRoots];
+    const permitted = canonical !== undefined && roots.some((root) => {
+      const rel = relative(root, canonical);
+      return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    });
+    if (!permitted || !canonical) throw new RecoverableError("DATA_PATH_OUTSIDE_ROOTS", "Raw data path is outside approved Read-Only Roots");
+    const metadata = await lstat(canonical);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new RecoverableError("INVALID_DATA_PATH", "Raw data path must be one regular file");
+    if (metadata.size > 2 * 1024 * 1024 * 1024) throw new RecoverableError("DATA_FILE_TOO_LARGE", "Raw data inspection is limited to files at most 2 GiB");
+    if (!/[.](?:csv|tsv)$/i.test(canonical)) throw new RecoverableError("UNSUPPORTED_DATA_FORMAT", "Raw data inspection currently supports CSV and TSV files");
+    return canonical;
+  }
+
   function registerDataTool(): void {
     if (dataRegistered) return;
     dataRegistered = true;
     pi.registerTool({
       name: DATA_TOOL,
-      label: "Inspect raw tabular data",
-      description: "Inspect a bounded sample of one CSV or TSV inside the project or an attached Read-Only Root without creating a target.",
-      promptSnippet: "Inspect raw tabular inputs through bounded structure and row samples before designing targets",
+      label: "Profile raw tabular data",
+      description: "Profile paginated CSV/TSV schema, selected columns, key cardinality, and optional cross-file key overlap without returning rows or creating a target.",
+      promptSnippet: "Profile selected columns and keys directly; paginate schema instead of loading raw files through evaluate_r",
       parameters: DATA_SCHEMA,
       async execute(_toolCallId, params, signal, _onUpdate, context) {
         try {
           await assertWorkerProvenance(context);
           if (!state) throw new RecoverableError("INVALID_PHASE", "Raw data inspection requires an active Workbench Session");
-          const input = params as { path?: unknown; maxRows?: unknown };
-          if (typeof input.path !== "string") throw new RecoverableError("INVALID_REQUEST", "Raw data inspection requires a path");
-          const requested = isAbsolute(input.path) ? input.path : resolve(state.projectRoot, input.path.replace(/^@/, ""));
-          const canonical = await realpath(requested).catch(() => undefined);
-          const roots = [state.projectRoot, ...state.readOnlyRoots];
-          const permitted = canonical !== undefined && roots.some((root) => {
-            const rel = relative(root, canonical);
-            return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-          });
-          if (!permitted || !canonical) throw new RecoverableError("DATA_PATH_OUTSIDE_ROOTS", "Raw data path is outside approved Read-Only Roots");
-          const metadata = await lstat(canonical);
-          if (!metadata.isFile() || metadata.isSymbolicLink()) throw new RecoverableError("INVALID_DATA_PATH", "Raw data path must be one regular file");
-          if (metadata.size > 2 * 1024 * 1024 * 1024) throw new RecoverableError("DATA_FILE_TOO_LARGE", "Raw data inspection is limited to files at most 2 GiB");
-          if (!/[.](?:csv|tsv)$/i.test(canonical)) throw new RecoverableError("UNSUPPORTED_DATA_FORMAT", "Raw data inspection currently supports CSV and TSV files");
+          const input = params as {
+            path?: unknown; columns?: unknown; key?: unknown; comparePath?: unknown;
+            columnOffset?: unknown; columnLimit?: unknown;
+          };
+          if (typeof input.path !== "string" || !Array.isArray(input.columns)) {
+            throw new RecoverableError("INVALID_REQUEST", "Raw data inspection requires a path and selected-column array");
+          }
+          if (input.comparePath !== undefined && (typeof input.comparePath !== "string" || typeof input.key !== "string")) {
+            throw new RecoverableError("INVALID_REQUEST", "Comparison inspection requires comparePath and key");
+          }
+          const canonical = await canonicalDataPath(input.path);
+          const comparePath = typeof input.comparePath === "string" ? await canonicalDataPath(input.comparePath) : undefined;
           const environment: WorkerEnvironment = state.phase === "implementation" ? "project" : "design";
           const runtime = await workerRuntime(environment);
-          const result = await inspectData(canonical, typeof input.maxRows === "number" ? input.maxRows : 100, {
+          const result = await inspectData({
+            path: canonical,
+            columns: input.columns as string[],
+            columnOffset: input.columnOffset as number,
+            columnLimit: input.columnLimit as number,
+            ...(typeof input.key === "string" ? { key: input.key } : {}),
+            ...(comparePath ? { comparePath } : {}),
+          }, {
             projectRoot: state.projectRoot,
             readOnlyRoots: state.readOnlyRoots,
             rscript: runtime,
             inspectorScript: process.env.PI_R_DATA_INSPECTOR_SCRIPT ?? "",
+            valueSummaryScript: process.env.PI_R_VALUE_SUMMARY_SCRIPT ?? "",
             bwrap: process.env.PI_R_BWRAP,
             sandboxPath: process.env.PI_R_SANDBOX_PATH,
           }, signal);
