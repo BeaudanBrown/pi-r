@@ -27,6 +27,7 @@ interface InspectorOptions {
   readOnlyRoots: string[];
   rscript: string;
   inspectorScript: string;
+  valueSummaryScript: string;
   bwrap?: string;
   sandboxPath?: string;
   timeoutMs?: number;
@@ -98,7 +99,7 @@ export async function inspectArtifact(
   options: InspectorOptions,
   signal?: AbortSignal,
 ): Promise<ArtifactEnvelope> {
-  if (!isAbsolute(options.rscript) || !isAbsolute(options.inspectorScript)) {
+  if (!isAbsolute(options.rscript) || !isAbsolute(options.inspectorScript) || !isAbsolute(options.valueSummaryScript)) {
     throw new RecoverableError("ARTIFACT_INSPECTOR_START_FAILED", "Artifact inspector runtime paths must be absolute");
   }
   const cacheRoot = resolve(options.projectRoot, ".pi/tmp/pi-r-artifact-cache");
@@ -131,6 +132,7 @@ export async function inspectArtifact(
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "LC_ALL", "C",
     "--setenv", "PATH", runtimePath,
+    "--setenv", "PI_R_VALUE_SUMMARY_SCRIPT", options.valueSummaryScript,
     "--chdir", options.projectRoot,
     options.rscript, "--vanilla", options.inspectorScript,
   );

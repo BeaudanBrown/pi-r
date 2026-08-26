@@ -114,7 +114,7 @@ async function tableArtifactProject() {
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
     version: 2,
-    runtimeVersion: "0.18.0",
+    runtimeVersion: "0.19.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -276,7 +276,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     { block: true, reason: "pi-r read path is outside approved read-only roots" },
   );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.18\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.19\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -557,13 +557,14 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.match(ctx.widgets.at(-1)[1][0], /worker=running/);
   assert.deepEqual(first.details.stateDelta.committed, ["x", "hostile"]);
   const rolledBack = await evaluate.execute("rollback", {
-    code: "orphan <- 99L; stop('planned failure')",
+    code: "orphan <- 99L; assign('direct_intruder', 7L, envir = get('.pi_r_session', envir = globalenv())); stop('planned failure')",
     targets: [],
     retain: ["orphan"],
   }, undefined, undefined, ctx);
   assert.equal(rolledBack.details.error.code, "R_EVALUATION_ERROR");
   assert.equal(rolledBack.details.stateDelta.rolledBack, true);
   assert.equal(rolledBack.details.objects.some((object) => object.name === "orphan"), false);
+  assert.equal(rolledBack.details.objects.some((object) => object.name === "direct_intruder"), false);
   const inspected = await h.tools.find((tool) => tool.name === "r_object_inspect").execute("inspect-x", {
     name: "x",
     columns: [],
@@ -572,6 +573,14 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   }, undefined, undefined, ctx);
   assert.equal(inspected.details.summary.kind, "atomic");
   assert.deepEqual(inspected.details.summary.values, [41]);
+  const unicode = await evaluate.execute("bounded-unicode", {
+    code: "paste(rep(intToUtf8(0x1f600), 1000L), collapse = '')",
+    targets: [],
+    retain: [],
+  }, undefined, undefined, ctx);
+  assert.equal(unicode.details.result.valuesTruncated, true);
+  const unicodeBytes = Buffer.byteLength(unicode.details.result.values[0]);
+  assert.ok(unicodeBytes <= 500, `bounded Unicode summary used ${unicodeBytes} bytes, ${unicode.details.result.values[0].length} UTF-16 units, ${[...unicode.details.result.values[0]].length} code points, prefix ${JSON.stringify(unicode.details.result.values[0].slice(0, 40))}`);
 
   await evaluate.execute("bounded-live-state", {
     code: Array.from({ length: 60 }, (_, index) => `object_${index + 1} <- ${index + 1}L`).join("\n"),
@@ -891,10 +900,17 @@ test("evaluate_r loads only explicitly requested targets under canonical names",
   await h.commands[0].options.handler("start", ctx);
   const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
 
-  const loaded = await evaluate.execute("load-target", { code: "sample_target", targets: ["sample_target"], retain: [] }, undefined, undefined, ctx);
+  const loaded = await evaluate.execute("load-target", {
+    code: "temporary_copy <- sample_target; temporary_copy",
+    targets: ["sample_target"],
+    retain: ["temporary_copy"],
+  }, undefined, undefined, ctx);
   assert.equal(loaded.details.error, null);
   assert.equal(loaded.details.value, 42);
   assert.ok(loaded.details.objects.some((object) => object.name === "sample_target" && object.origin === "target"));
+  const cleared = await h.tools.find((tool) => tool.name === "r_worker_clear").execute("clear-target-context", {}, undefined, undefined, ctx);
+  assert.equal(cleared.details.objects.some((object) => object.name === "temporary_copy"), false);
+  assert.equal(cleared.details.objects.find((object) => object.name === "sample_target").origin, "target");
   const loadedSnapshot = currentState((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
   assert.equal(loadedSnapshot.objects.find((object) => object.name === "sample_target").origin, "target");
   const unloaded = await evaluate.execute("omit-target", {
@@ -1326,6 +1342,21 @@ test("table artifact inspection returns structure and summaries without rows and
   assert.equal("rows" in inspected.details.structure, false);
   assert.doesNotMatch(inspected.content[0].text, /\"a\"|\"b\"/);
   assert.deepEqual(inspected.details.warnings, []);
+  await h.tools.find((tool) => tool.name === "evaluate_r").execute("retain-table", {
+    code: "working_table <- sample_table; nrow(working_table)",
+    targets: ["sample_table"],
+    retain: ["working_table"],
+  }, undefined, undefined, ctx);
+  const retainedTable = await h.tools.find((tool) => tool.name === "r_object_inspect").execute("inspect-retained-table", {
+    name: "working_table",
+    columns: ["value"],
+    columnOffset: 0,
+    columnLimit: 20,
+  }, undefined, undefined, ctx);
+  assert.deepEqual(retainedTable.details.summary.dimensions, [2, 2]);
+  assert.equal(retainedTable.details.summary.selected[0].minimum, 10);
+  assert.equal(retainedTable.details.summary.columns.nextOffset, null);
+  assert.equal(JSON.stringify(retainedTable.details.summary).includes("rows"), false);
   const object = await inspectArtifact.execute("inspect-object", {
     target: "sample_object",
     facets: ["structure"],
@@ -1503,7 +1534,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.18\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.19\.0.*fresh Pi session/i);
   assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
   const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);

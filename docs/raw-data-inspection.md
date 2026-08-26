@@ -1,7 +1,19 @@
 # Bounded raw data inspection
 
-Design and Implementation Modes expose `r_data_inspect` for CSV and TSV inputs that do not yet have contracted targets. This is intentionally distinct from `r_artifact_inspect`, whose Artifact Envelopes always describe target-backed values.
+Design and Implementation Modes expose `r_data_inspect` for CSV and TSV inputs, distinct from target-backed `r_artifact_inspect` and worker-held `r_object_inspect`.
 
-The requested file must resolve beneath the canonical project root or an explicitly attached Read-Only Root. Traversal, symlink escapes, non-files, unsupported extensions, and files larger than 2 GiB are rejected before execution. Inspection runs without network access in the shared deterministic Bubblewrap runtime and cannot mutate source.
+Each requested file must resolve beneath the canonical project root or an attached Read-Only Root. Traversal, symlink escapes, non-files, unsupported extensions, and files larger than 2 GiB are rejected before execution. Primary and comparison paths receive the same checks. Inspection runs without network access in deterministic Bubblewrap and cannot mutate source.
 
-The tool reads at most 1,000 rows and returns a bounded structure: byte size, sampled row count, column names/classes, sampled missing counts, up to ten rows, and whether the sample limit was reached. Use it to understand an input before proposing the target graph. Use `evaluate_r` for temporary computations and `r_artifact_inspect` after a contracted target exists.
+A request supplies:
+
+- `path`;
+- up to ten columns to summarize;
+- `columnOffset` and `columnLimit` for schema pagination;
+- an optional key; and
+- an optional comparison path when key overlap is required.
+
+The tool returns byte and row counts, one explicit schema page with `nextOffset`, whole-file summaries for requested columns, missing requested names, key missingness/cardinality/duplicate-row count, and optional cross-file unique-key overlap. It never returns rows by default.
+
+Schema inference reads a bounded sample. Whole-file summaries load only explicitly selected columns; key and overlap operations load only the requested key. This keeps wide-file discovery bounded while avoiding manual `fread()` and repeated full-table loads.
+
+Treat these results as structural observations. Column names do not establish domain meaning, coding conventions, censoring semantics, or an authorized duplicate-resolution rule. Obtain those decisions from the Project Contract, source documentation, or the user.

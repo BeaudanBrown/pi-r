@@ -75,6 +75,11 @@ export interface SandboxedRWorkerOptions {
 const MAX_PROTOCOL_LINE = 1024 * 1024;
 const RESPONSE_PREFIX = "PI_R_RESPONSE:";
 const MAX_DIAGNOSTIC_TAIL = 2048;
+const R_NAME = /^[A-Za-z.][A-Za-z0-9._]*$/;
+
+function validRName(name: unknown): name is string {
+  return typeof name === "string" && name.length <= 200 && R_NAME.test(name) && !/^\.[0-9]/.test(name);
+}
 
 export interface WorkerCrashDiagnostics {
   code: string;
@@ -156,8 +161,8 @@ export class SandboxedRWorker {
   ): Promise<EvaluateRResult> {
     if (
       typeof request.code !== "string" ||
-      !Array.isArray(request.targets) || request.targets.some((name) => typeof name !== "string") ||
-      !Array.isArray(request.retain) || request.retain.some((name) => typeof name !== "string")
+      !Array.isArray(request.targets) || request.targets.some((name) => !validRName(name)) ||
+      !Array.isArray(request.retain) || request.retain.some((name) => !validRName(name))
     ) {
       throw new RecoverableError("INVALID_REQUEST", "evaluate_r requires code plus arrays of canonical target and retained-object names");
     }
@@ -210,6 +215,9 @@ export class SandboxedRWorker {
   async inspectObject(
     request: { name: string; columns: string[]; columnOffset: number; columnLimit: number },
   ): Promise<{ name: string; summary: unknown; error: unknown; objects: WorkerObject[] }> {
+    if (!validRName(request.name)) {
+      throw new RecoverableError("INVALID_REQUEST", "r_object_inspect requires one canonical object name of at most 200 characters");
+    }
     if (!this.#child || this.#state !== "running") {
       throw new RecoverableError("WORKER_STOPPED", "No running worker contains objects to inspect");
     }

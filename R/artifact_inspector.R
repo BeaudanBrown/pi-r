@@ -1,6 +1,8 @@
 suppressPackageStartupMessages(library(jsonlite))
 
-`%||%` <- function(left, right) if (is.null(left)) right else left
+summary_script <- Sys.getenv("PI_R_VALUE_SUMMARY_SCRIPT", unset = "")
+if (!nzchar(summary_script) || !file.exists(summary_script)) stop("PI_R_VALUE_SUMMARY_SCRIPT is unavailable")
+source(summary_script, local = TRUE)
 
 bounded_text <- function(value, max_bytes = 2000L) {
   text <- paste(as.character(value %||% character()), collapse = "\n")
@@ -28,17 +30,12 @@ table_structure <- function(value, include_summary) {
   column_names <- head(all_names, 100L)
   columns <- lapply(column_names, function(name) list(name = substr(name, 1L, 200L), type = substr(paste(class(value[[name]]), collapse = "/"), 1L, 200L)))
   summaries <- if (!include_summary) NULL else lapply(column_names, function(name) {
-    column <- value[[name]]
-    common <- list(name = substr(name, 1L, 200L), type = substr(paste(class(column), collapse = "/"), 1L, 200L), missing = sum(is.na(column)))
-    if (is.numeric(column)) {
-      finite <- column[is.finite(column)]
-      c(common, list(
-        minimum = if (length(finite)) min(finite) else NULL,
-        maximum = if (length(finite)) max(finite) else NULL,
-        mean = if (length(finite)) mean(finite) else NULL
-      ))
+    summary <- pi_r_column_summary(value[[name]], name)
+    common <- list(name = summary$name, type = paste(unlist(summary$class), collapse = "/"), missing = summary$missing)
+    if (is.numeric(value[[name]])) {
+      c(common, list(minimum = summary$minimum, maximum = summary$maximum, mean = summary$mean))
     } else {
-      c(common, list(unique = length(unique(column))))
+      c(common, list(unique = summary$unique))
     }
   })
   list(

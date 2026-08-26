@@ -1,8 +1,20 @@
 `%||%` <- function(left, right) if (is.null(left)) right else left
 
 pi_r_bound_string <- function(value, max_bytes = 1000L) {
-  text <- paste(as.character(value %||% character()), collapse = "\n")
-  if (nchar(text, type = "bytes") > max_bytes) substr(text, 1L, max_bytes) else text
+  text <- enc2utf8(paste(as.character(value %||% character()), collapse = "\n"))
+  character_limit <- min(nchar(text, type = "chars"), max_bytes)
+  bounded <- substr(text, 1L, character_limit)
+  while (nchar(bounded, type = "bytes") > max_bytes && character_limit > 0L) {
+    character_limit <- character_limit - 1L
+    bounded <- substr(text, 1L, character_limit)
+  }
+  characters <- strsplit(bounded, "", fixed = TRUE)[[1L]]
+  if (!length(characters)) return("")
+  json_weights <- vapply(characters, function(character) {
+    if (nchar(character, type = "bytes") == 1L) 1L else 12L
+  }, integer(1))
+  keep <- which(cumsum(json_weights) <= max_bytes)
+  if (!length(keep)) "" else paste(characters[keep], collapse = "")
 }
 
 pi_r_column_summary <- function(column, name) {
@@ -70,12 +82,20 @@ pi_r_value_summary <- function(value, depth = 0L, max_depth = 2L, max_entries = 
   bytes <- length(serialize(value, NULL))
   if (is.atomic(value)) {
     shown <- head(value, max_entries)
+    bounded_values <- if (is.character(shown)) {
+      as.list(vapply(shown, pi_r_bound_string, character(1), max_bytes = 500L))
+    } else {
+      as.list(shown)
+    }
     return(list(
       kind = "atomic",
       class = classes,
       length = length(value),
       bytes = bytes,
-      values = unname(as.list(shown)),
+      values = unname(bounded_values),
+      valuesTruncated = if (is.character(shown)) any(vapply(seq_along(shown), function(index) {
+        !identical(bounded_values[[index]], as.character(shown[[index]]))
+      }, logical(1))) else FALSE,
       omitted = max(0L, length(value) - length(shown))
     ))
   }
@@ -84,7 +104,7 @@ pi_r_value_summary <- function(value, depth = 0L, max_depth = 2L, max_entries = 
     count <- min(length(value), max_entries)
     entries <- if (depth >= max_depth) list() else unname(lapply(seq_len(count), function(index) list(
       name = substr(value_names[[index]], 1L, 200L),
-      summary = pi_r_value_summary(value[[index]], depth + 1L, max_depth, max_entries)
+      summary = pi_r_value_summary(value[[index]], depth + 1L, max_depth, min(5L, max_entries))
     )))
     return(list(
       kind = "list",

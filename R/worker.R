@@ -88,11 +88,11 @@ commit_context <- function(context, target_names) {
   .pi_r_loaded_targets <<- target_names
 }
 
-state_difference <- function(before_names, staged, retain) {
+state_difference <- function(before_names, staged, retain, baseline = .pi_r_session) {
   staged_names <- ls(staged, all.names = TRUE)
   created <- setdiff(staged_names, before_names)
   modified <- intersect(staged_names, before_names)[vapply(intersect(staged_names, before_names), function(name) {
-    !identical(get(name, envir = staged, inherits = FALSE), get(name, envir = .pi_r_session, inherits = FALSE))
+    !identical(get(name, envir = staged, inherits = FALSE), get(name, envir = baseline, inherits = FALSE))
   }, logical(1))]
   list(
     committed = intersect(retain, staged_names),
@@ -108,8 +108,12 @@ handle_evaluate <- function(request) {
   conditions$error <- NULL
   value <- NULL
   result_summary <- NULL
-  before_names <- ls(.pi_r_session, all.names = TRUE)
-  retain <- unique(unlist(request$retain %||% character(), use.names = FALSE))
+  snapshot_globals <- clone_bindings(.pi_r_globals, globalenv())
+  snapshot_session <- clone_bindings(.pi_r_session, snapshot_globals)
+  snapshot_metadata <- clone_bindings(.pi_r_metadata, emptyenv())
+  snapshot_targets <- .pi_r_loaded_targets
+  before_names <- ls(snapshot_session, all.names = TRUE)
+  retain <- unique(substr(unlist(request$retain %||% character(), use.names = FALSE), 1L, 200L))
   state_delta <- list(committed = list(), discarded = list(), rolledBack = FALSE)
   staged <- NULL
   context <- NULL
@@ -122,7 +126,11 @@ handle_evaluate <- function(request) {
       missing_retained <- setdiff(retain, ls(staged, all.names = TRUE))
       if (length(missing_retained)) stop("Requested retained objects were not created: ", paste(missing_retained, collapse = ", "))
       result_summary <- pi_r_value_summary(value)
-      state_delta <- state_difference(before_names, staged, retain)
+      state_delta <- state_difference(before_names, staged, retain, snapshot_session)
+      .pi_r_globals <<- snapshot_globals
+      .pi_r_session <<- snapshot_session
+      .pi_r_metadata <<- snapshot_metadata
+      .pi_r_loaded_targets <<- snapshot_targets
       for (name in retain) {
         existed <- exists(name, envir = .pi_r_session, inherits = FALSE)
         assign(name, clone_value(get(name, envir = staged, inherits = FALSE)), envir = .pi_r_session)
@@ -142,10 +150,18 @@ handle_evaluate <- function(request) {
       invokeRestart("muffleMessage")
     }),
     error = function(condition) {
-      staged_names <- if (is.null(staged)) character() else ls(staged, all.names = TRUE)
+      difference <- if (is.null(staged)) {
+        list(discarded = list())
+      } else {
+        state_difference(before_names, staged, character(), snapshot_session)
+      }
+      .pi_r_globals <<- snapshot_globals
+      .pi_r_session <<- snapshot_session
+      .pi_r_metadata <<- snapshot_metadata
+      .pi_r_loaded_targets <<- snapshot_targets
       state_delta <<- list(
         committed = list(),
-        discarded = as.list(sort(setdiff(staged_names, before_names))),
+        discarded = difference$discarded,
         rolledBack = TRUE
       )
       conditions$error <- list(
@@ -157,7 +173,7 @@ handle_evaluate <- function(request) {
     }
   )
   list(
-    value = if (is.null(conditions$error) && is.atomic(value) && length(value) <= 100L && length(serialize(value, NULL)) <= 4096L) value else NULL,
+    value = if (is.null(conditions$error) && is.atomic(value) && is.null(attributes(value)) && length(value) <= 100L && length(serialize(value, NULL)) <= 4096L) value else NULL,
     result = if (is.null(conditions$error)) result_summary else NULL,
     stateDelta = state_delta,
     warnings = unname(substr(conditions$warnings[seq_len(min(length(conditions$warnings), 50L))], 1L, 1000L)),
@@ -168,7 +184,7 @@ handle_evaluate <- function(request) {
 }
 
 handle_inspect <- function(request) {
-  name <- request$name
+  name <- substr(request$name, 1L, 200L)
   environment <- if (exists(name, envir = .pi_r_session, inherits = FALSE)) {
     .pi_r_session
   } else if (exists(name, envir = .pi_r_globals, inherits = FALSE)) {

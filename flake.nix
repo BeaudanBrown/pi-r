@@ -24,7 +24,7 @@
             inherit (nixpkgs) rev narHash lastModified;
           });
 
-          piResources = pkgs.runCommand "pi-r-resources-0.18.0" {
+          piResources = pkgs.runCommand "pi-r-resources-0.19.0" {
             nativeBuildInputs = [ pkgs.esbuild ];
           } ''
             mkdir -p $out/share/pi-r/extensions $out/share/pi-r/R $out/share/pi-r/resources $out/share/pi-r/skills/pi-r/references $out/share/pi-r/docs
@@ -61,7 +61,7 @@
 
           piR = pkgs.stdenvNoCC.mkDerivation {
             pname = "pi-r";
-            version = "0.18.0";
+            version = "0.19.0";
             src = self;
             nativeBuildInputs = [ pkgs.esbuild pkgs.makeWrapper ];
 
@@ -165,7 +165,7 @@
             packages = with pkgs.rPackages; [ data_table jsonlite qs2 styler targets yaml ];
           };
         in {
-          verify = pkgs.runCommand "pi-r-verification-0.18.0" {
+          verify = pkgs.runCommand "pi-r-verification-0.19.0" {
             nativeBuildInputs = [ pkgs.bubblewrap pkgs.esbuild pkgs.git pkgs.jq pkgs.nix pkgs.nodejs_22 pkgs.R ];
           } ''
             export HOME="$TMPDIR/home"

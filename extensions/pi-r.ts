@@ -36,7 +36,7 @@ const DATA_TOOL = "r_data_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
 const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-current-state";
-const PI_R_RUNTIME_VERSION = "0.18.0";
+const PI_R_RUNTIME_VERSION = "0.19.0";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
 const MODEL_R_NAME_PATTERN = "^[A-Za-z.][A-Za-z0-9._]*$";
@@ -71,7 +71,7 @@ const DATA_SCHEMA = {
   required: ["path", "columns", "columnOffset", "columnLimit"],
   properties: {
     path: { type: "string", minLength: 1, maxLength: 500 },
-    columns: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+    columns: { type: "array", maxItems: 10, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
     key: { type: "string", minLength: 1, maxLength: 200 },
     comparePath: { type: "string", minLength: 1, maxLength: 500 },
     columnOffset: { type: "integer", minimum: 0, maximum: 10000 },
@@ -85,8 +85,8 @@ const EVALUATE_SCHEMA = {
   required: ["code", "targets", "retain"],
   properties: {
     code: { type: "string", minLength: 1, maxLength: 50_000 },
-    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
-    retain: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN } },
+    targets: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
+    retain: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
   },
 } as const;
 const OBJECT_INSPECT_SCHEMA = {
@@ -94,8 +94,8 @@ const OBJECT_INSPECT_SCHEMA = {
   additionalProperties: false,
   required: ["name", "columns", "columnOffset", "columnLimit"],
   properties: {
-    name: { type: "string", pattern: MODEL_R_NAME_PATTERN },
-    columns: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+    name: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 },
+    columns: { type: "array", maxItems: 10, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
     columnOffset: { type: "integer", minimum: 0, maximum: 10000 },
     columnLimit: { type: "integer", minimum: 1, maximum: 50 },
   },
@@ -1039,6 +1039,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             readOnlyRoots: state.readOnlyRoots,
             rscript: runtime,
             inspectorScript: process.env.PI_R_ARTIFACT_INSPECTOR_SCRIPT ?? "",
+            valueSummaryScript: process.env.PI_R_VALUE_SUMMARY_SCRIPT ?? "",
             bwrap: process.env.PI_R_BWRAP,
           }, signal);
           return { content: [{ type: "text", text: boundedJson(result) }], details: result };
@@ -2075,7 +2076,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const proposal = state.phase !== "implementation"
       ? " Use r_contract_propose to create or revise the single Project Contract draft. Approved Functions declare signatures only and lock as fail-closed stubs. Existing input files are Source File Targets using source.constant; generated files use output bindings."
       : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
-    const exploration = " Use r_data_inspect for bounded CSV/TSV inputs before targets exist. Use evaluate_r for bounded temporary computation; target objects must be requested explicitly by canonical name. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
+    const exploration = " Use r_data_inspect for paginated schema, selected-column summaries, key cardinality, and overlap before targets exist. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
     const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
     const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. Stay in the current mode when authority is sufficient. A topology change in Implementation Mode requires the user-only /r revise command: state that once, do not call unavailable proposal tools, and wait. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. Answer confirmation questions directly before constructing detailed payloads.";
     return {
