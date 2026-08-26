@@ -41,7 +41,7 @@ function proposalForContract(contract) {
 }
 
 async function inspectFunction(tool, id, name, ctx) {
-  const result = await tool.execute(id, { functions: [name] }, undefined, undefined, ctx);
+  const result = await tool.execute(id, { functions: [name], sourceOffset: 0, sourceLimit: 3000 }, undefined, undefined, ctx);
   return { ...result, details: result.details.functions[0] };
 }
 
@@ -618,6 +618,15 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
     { value: "missing", count: 1 },
   ]);
   assert.equal(frequencies.details.result.complete, true);
+  const contingency = await evaluate.execute("structured-contingency-table", {
+    code: "table(group = c('a', 'b', 'a'), outcome = c('x', 'x', 'y'))",
+    targets: [],
+    retain: [],
+  }, undefined, undefined, ctx);
+  assert.equal(contingency.details.result.kind, "frequency-table");
+  assert.deepEqual(contingency.details.result.dimensions, [2, 2]);
+  assert.deepEqual(contingency.details.result.dimensionNames, ["group", "outcome"]);
+  assert.deepEqual(contingency.details.result.entries[0], { index: [1, 1], labels: ["a", "x"], count: 1 });
 
   await evaluate.execute("bounded-live-state", {
     code: Array.from({ length: 60 }, (_, index) => `object_${index + 1} <- ${index + 1}L`).join("\n"),
@@ -630,6 +639,11 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(boundedSnapshot.objectsTruncated, true);
   assert.ok(boundedSnapshot.objects.length <= 50);
   assert.ok(boundedMessage.content.length <= 4096);
+  const boundedStatus = await h.tools.find((tool) => tool.name === "r_worker_status")
+    .execute("bounded-status", {}, undefined, undefined, ctx);
+  const projectedStatus = JSON.parse(boundedStatus.content[0].text);
+  assert.ok(Buffer.byteLength(boundedStatus.content[0].text) <= 8192);
+  if (projectedStatus.modelOutputTruncated) assert.ok(projectedStatus.omissions.length > 0);
 });
 
 test("framed worker responses tolerate and log unexpected process stdout", { timeout: 30_000 }, async (t) => {
@@ -1474,8 +1488,13 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.match(inspected.content[0].text, /"signature": "load_input <- function\(path\)"[\s\S]*"sourceHash": "sha256:/);
   assert.equal(inspected.details.behavior.specified, true);
   assert.equal(inspected.details.behavior.purpose, "Load the approved input table");
-  const batch = await inspectTool.execute("inspect-batch", { functions: ["load_input", "make_config"] }, undefined, undefined, ctx);
+  const batch = await inspectTool.execute("inspect-batch", {
+    functions: ["load_input", "make_config"], sourceOffset: 0, sourceLimit: 0,
+  }, undefined, undefined, ctx);
   assert.deepEqual(batch.details.functions.map((entry) => entry.function), ["load_input", "make_config"]);
+  assert.equal(batch.details.functions.every((entry) => entry.sourceOmitted && entry.behavior.requirementsOmitted), true);
+  assert.doesNotMatch(batch.content[0].text, /Not implemented/);
+  assert.doesNotThrow(() => JSON.parse(batch.content[0].text));
   const headBefore = await git(root, "rev-parse", "HEAD");
 
   const result = await editTool.execute("edit-1", {

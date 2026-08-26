@@ -101,16 +101,16 @@
           "purpose": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1000,
+            "maxLength": 500,
             "description": "User-approved domain purpose for implementation. Required for new Design and Revision proposals; absent only in legacy locked contracts."
           },
           "requirements": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": 10,
             "uniqueItems": true,
             "description": "User-approved behavioral requirements, including relevant missing-value, duplicate, coding, cohort, and output rules. Requirements contain no R body code.",
-            "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            "items": { "type": "string", "minLength": 1, "maxLength": 300 }
           }
         }
       }

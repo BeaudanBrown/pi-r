@@ -2,7 +2,7 @@
 
 After `/r lock`, Implementation Mode replaces contract proposal with two narrow tools:
 
-- `r_function_inspect` accepts 1–20 Approved Function names and returns each locked signature, behavioral specification, complete source, and SHA-256 source digest in one coherent result. Use a one-item array immediately before editing one function.
+- `r_function_inspect` accepts 1–20 Approved Function names. Use `sourceLimit=0` for compact batch status; requirements and source are omitted there. Immediately before editing, request one function with `sourceOffset` and a source page of at most 3,000 characters. The result provides pagination metadata and a digest of the complete source.
 - `r_function_edit` accepts one function name and digest plus only statements from inside its body. Do not repeat the declaration or outer braces. Local named helpers and anonymous functions remain valid.
 
 Neither tool accepts a path. Paths derive from the locked contract as `R/<function>.R`; absent functions remain outside authority. Scoped edit requests are internally serialized, so the model need not speculate about concurrent Git locks.

@@ -156,16 +156,18 @@ const EDIT_TOOL = "r_function_edit";
 const INSPECT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["functions"],
+  required: ["functions", "sourceOffset", "sourceLimit"],
   properties: {
     functions: {
       type: "array",
       minItems: 1,
       maxItems: 20,
       uniqueItems: true,
-      description: "Approved Functions to inspect together. Use a one-item array immediately before editing one function.",
+      description: "Approved Functions to inspect together. Batch inspection returns compact status; use one function with a positive sourceLimit immediately before editing.",
       items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 100 },
     },
+    sourceOffset: { type: "integer", minimum: 0, maximum: 50000, description: "Character offset for a one-function source page." },
+    sourceLimit: { type: "integer", minimum: 0, maximum: 3000, description: "Source characters to return. Use 0 for compact batch inspection; positive values require exactly one function." },
   },
 } as const;
 const EDIT_SCHEMA = {
@@ -641,8 +643,58 @@ export default function piRExtension(pi: ExtensionAPI): void {
   }
 
   function boundedJson(value: unknown): string {
-    const text = JSON.stringify(value, null, 2);
-    return text.length <= 8192 ? text : `${text.slice(0, 8192)}\n[structured result truncated]`;
+    const clone = structuredClone(value) as unknown;
+    const omissions = new Map<string, number>();
+    const candidates = (): Array<{ path: string; value: unknown[] | string; parent: any; key: string | number }> => {
+      const found: Array<{ path: string; value: unknown[] | string; parent: any; key: string | number }> = [];
+      const visit = (current: any, path: string, parent?: any, key?: string | number): void => {
+        if (typeof current === "string" && parent !== undefined && current.length > 200) {
+          found.push({ path, value: current, parent, key: key! });
+          return;
+        }
+        if (Array.isArray(current)) {
+          if (parent !== undefined && current.length > 1) found.push({ path, value: current, parent, key: key! });
+          current.forEach((item, index) => visit(item, `${path}[${index}]`, current, index));
+          return;
+        }
+        if (current && typeof current === "object") {
+          for (const [childKey, child] of Object.entries(current)) visit(child, `${path}.${childKey}`, current, childKey);
+        }
+      };
+      visit(clone, "$ ".trim());
+      return found;
+    };
+    let text = JSON.stringify(clone, null, 2);
+    while (Buffer.byteLength(text) > 7600) {
+      const options = candidates().sort((left, right) => JSON.stringify(right.value).length - JSON.stringify(left.value).length);
+      const selected = options[0];
+      if (!selected) break;
+      if (Array.isArray(selected.value)) {
+        const keep = Math.max(1, Math.floor(selected.value.length / 2));
+        const omitted = selected.value.length - keep;
+        selected.value.splice(keep);
+        omissions.set(selected.path, (omissions.get(selected.path) ?? 0) + omitted);
+      } else {
+        const keep = Math.max(200, Math.floor(selected.value.length / 2));
+        const omitted = selected.value.length - keep;
+        selected.parent[selected.key] = `${selected.value.slice(0, keep)}\n[truncated]`;
+        omissions.set(selected.path, (omissions.get(selected.path) ?? 0) + omitted);
+      }
+      text = JSON.stringify(clone, null, 2);
+    }
+    if (clone && typeof clone === "object" && !Array.isArray(clone) && omissions.size > 0) {
+      Object.assign(clone as Record<string, unknown>, {
+        modelOutputTruncated: true,
+        omissions: [...omissions.entries()].map(([path, omitted]) => ({ path, omitted })),
+      });
+      text = JSON.stringify(clone, null, 2);
+    }
+    if (Buffer.byteLength(text) <= 8192) return text;
+    return JSON.stringify({
+      modelOutputTruncated: true,
+      error: "Structured result exceeded the model-output limit after bounded projection",
+      availableInToolDetails: true,
+    }, null, 2);
   }
 
   async function workerStatusText(): Promise<string> {
@@ -948,6 +1000,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
           });
           const verification = {
             status: checks.every((check) => check.behaviorSpecified) ? "inspection-required" : "behavior-unspecified",
+            totalChecks: checks.length,
+            checksTruncated: false,
             checks,
             agentAction: checks.every((check) => check.behaviorSpecified)
               ? "Inspect each current target artifact and compare it with every listed requirement before claiming implementation complete"
@@ -1363,7 +1417,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       name: INSPECT_TOOL,
       label: "Inspect Approved R function",
       description: "Read up to 20 Approved Functions with signatures, locked behavior, source, and current digests. Inspection is one coherent read; scoped edits remain internally serialized.",
-      promptSnippet: "Inspect all requested functions together; before editing, use the returned sourceHash and do not repeat bodies or hashes in prose",
+      promptSnippet: "Use sourceLimit=0 for compact batch status; immediately before editing, inspect one function with a source page, use its sourceHash, and do not repeat bodies or hashes in prose",
       parameters: INSPECT_SCHEMA,
       async execute(_toolCallId, params, _signal, _onUpdate, context) {
         const operation = editQueue.then(async () => {
@@ -1376,8 +1430,39 @@ export default function piRExtension(pi: ExtensionAPI): void {
           if (dirty.stdout.trim()) {
             throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
           }
-          const input = params as { functions?: unknown };
-          return { functions: await inspectApprovedFunctions(state.projectRoot, input?.functions) };
+          const input = params as { functions?: unknown; sourceOffset?: unknown; sourceLimit?: unknown };
+          const names = input.functions as string[];
+          const sourceOffset = input.sourceOffset as number;
+          const sourceLimit = input.sourceLimit as number;
+          if (sourceLimit > 0 && names.length !== 1) {
+            throw new RecoverableError("INVALID_REQUEST", "A positive sourceLimit requires exactly one Approved Function");
+          }
+          const inspected = await inspectApprovedFunctions(state.projectRoot, names);
+          return {
+            functions: inspected.map((entry) => {
+              const sourcePage = sourceLimit > 0 ? entry.source.slice(sourceOffset, sourceOffset + sourceLimit) : "";
+              const nextSourceOffset = sourceOffset + sourcePage.length < entry.source.length
+                ? sourceOffset + sourcePage.length
+                : null;
+              return {
+                ...entry,
+                source: sourcePage,
+                sourceBytes: Buffer.byteLength(entry.source),
+                sourceOffset,
+                nextSourceOffset,
+                sourceOmitted: sourceLimit === 0,
+                behavior: names.length === 1
+                  ? entry.behavior
+                  : {
+                      specified: entry.behavior.specified,
+                      purpose: entry.behavior.purpose,
+                      requirementCount: entry.behavior.requirements.length,
+                      requirementsOmitted: entry.behavior.requirements.length > 0,
+                      agentAction: entry.behavior.agentAction,
+                    },
+              };
+            }),
+          };
         });
         editQueue = operation.then(() => undefined, () => undefined);
         try {
@@ -2139,9 +2224,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const roots = [state.projectRoot, ...state.readOnlyRoots].join(", ");
     const currentGuidance = (await guidanceRoots).join(", ");
     const proposal = state.phase !== "implementation"
-      ? " Use r_contract_propose to create or revise the single Project Contract draft. Approved Functions declare signatures only and lock as fail-closed stubs. Existing input files are Source File Targets using source.constant; generated files use output bindings."
+      ? " Use r_contract_propose to create or revise the single Project Contract draft. Approved Functions declare signatures plus user-approved purpose and behavioral requirements, never bodies, and lock as fail-closed stubs. Existing input files are Source File Targets using source.constant; generated files use output bindings."
       : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
-    const exploration = " Use r_data_inspect for paginated schema, selected-column summaries (selected[].top contains bounded value/count entries and topComplete says whether all values are present), key cardinality, and overlap before targets exist. In evaluate_r, targets means existing pipeline artifacts to load and retain means successful assignment names to preserve; return a named structured value as the final expression instead of using cat, print, cbind, matrices, or formatted text. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
+    const exploration = " Use r_data_inspect for paginated schema, selected-column summaries (selected[].top contains bounded value/count entries and topComplete says whether all values are present), key cardinality, and overlap before targets exist. In evaluate_r, targets means existing pipeline artifacts to load and retain means successful assignment names to preserve; return a named structured value, vector, table, or matrix as the final expression instead of using cat, print, cbind solely for display, or hand-formatted text. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
     const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
     const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. Stay in the current mode when authority is sufficient. A topology change in Implementation Mode requires the user-only /r revise command: state that once, do not call unavailable proposal tools, and wait. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. Answer confirmation questions directly before constructing detailed payloads. For implementation requests, do not narrate or repeat complete candidate bodies, source hashes, or tool payloads before acting: inspect, resolve only blocking uncertainty, then call the scoped tool. Keep progress text to at most two concise sentences.";
     return {

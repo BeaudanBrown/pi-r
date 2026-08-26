@@ -87,18 +87,31 @@ pi_r_value_summary <- function(value, depth = 0L, max_depth = 2L, max_entries = 
   classes <- as.list(substr(head(class(value), 8L), 1L, 100L))
   bytes <- length(serialize(value, NULL))
   if (inherits(value, "table")) {
-    table_names <- names(value)
-    if (is.null(table_names)) table_names <- as.character(seq_along(value))
+    dimensions <- dim(value) %||% length(value)
+    dimension_names <- dimnames(value) %||% list(names(value) %||% as.character(seq_along(value)))
     count <- min(length(value), max_entries)
+    entries <- if (length(dimensions) == 1L) {
+      unname(lapply(seq_len(count), function(index) list(
+        value = pi_r_bound_string(dimension_names[[1L]][[index]] %||% "", 200L),
+        count = unname(value[[index]])
+      )))
+    } else {
+      unname(lapply(seq_len(count), function(index) {
+        coordinates <- arrayInd(index, dimensions)
+        labels <- unname(lapply(seq_along(dimensions), function(dimension) {
+          pi_r_bound_string(dimension_names[[dimension]][[coordinates[[dimension]]]], 200L)
+        }))
+        list(index = as.list(unname(coordinates)), labels = labels, count = unname(value[[index]]))
+      }))
+    }
     return(list(
       kind = "frequency-table",
       class = classes,
       length = length(value),
       bytes = bytes,
-      entries = unname(lapply(seq_len(count), function(index) list(
-        value = pi_r_bound_string(table_names[[index]] %||% "", 200L),
-        count = unname(value[[index]])
-      ))),
+      dimensions = as.list(unname(dimensions)),
+      dimensionNames = unname(lapply(names(dimension_names) %||% rep("", length(dimensions)), pi_r_bound_string, max_bytes = 200L)),
+      entries = entries,
       complete = length(value) <= count,
       omitted = max(0L, length(value) - count)
     ))

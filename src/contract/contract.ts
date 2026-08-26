@@ -366,16 +366,16 @@ export function validateContract(input: unknown): ProjectContract {
     let requirements: string[] | undefined;
     if (fn.requirements !== undefined) {
       requirements = stringArray(fn.requirements, `${path}.requirements`).map((requirement, requirementIndex) =>
-        boundedString(requirement, `${path}.requirements[${requirementIndex}]`, 500),
+        boundedString(requirement, `${path}.requirements[${requirementIndex}]`, 300),
       );
-      if (requirements.length === 0 || requirements.length > 20) {
-        invalid(`${path}.requirements must contain between 1 and 20 entries`);
+      if (requirements.length === 0 || requirements.length > 10) {
+        invalid(`${path}.requirements must contain between 1 and 10 entries`);
       }
     }
     return {
       name: rName(fn.name, `${path}.name`),
       parameters: stringArray(fn.parameters, `${path}.parameters`, true),
-      ...(fn.purpose !== undefined ? { purpose: boundedString(fn.purpose, `${path}.purpose`, 1000) } : {}),
+      ...(fn.purpose !== undefined ? { purpose: boundedString(fn.purpose, `${path}.purpose`, 500) } : {}),
       ...(requirements ? { requirements } : {}),
     };
   });
