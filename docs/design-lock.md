@@ -14,7 +14,7 @@ Lock immediately displays `R:locking` progress while it revalidates the Workbenc
 
 Before asking for confirmation, lock rejects tracked source changes. The confirmation contains:
 
-- Approved Function names and required parameters;
+- Approved Function names, required parameters, purpose, and behavioral requirements;
 - canonical constants;
 - R package dependencies;
 - the target dependency graph, Artifact Kinds, and Dynamic Patterns; and

@@ -1,34 +1,27 @@
 # Scoped Approved Function implementation
 
-After `/r lock`, Implementation Mode replaces the contract proposal capability with two narrow tools:
+After `/r lock`, Implementation Mode replaces contract proposal with two narrow tools:
 
-- `r_function_inspect` accepts an Approved Function name and returns its locked signature, complete source, and a SHA-256 source digest.
-- `r_function_edit` accepts that function name and digest plus only the R statements from inside the function body. Do not repeat the outer Approved Function declaration or include outer braces; local named helpers and anonymous functions remain valid statements. For example: `{ "function": "load_shhs1", "expectedSourceHash": "sha256:...", "statements": "fread(shhs1_status_file)" }`.
+- `r_function_inspect` accepts 1–20 Approved Function names and returns each locked signature, behavioral specification, complete source, and SHA-256 source digest in one coherent result. Use a one-item array immediately before editing one function.
+- `r_function_edit` accepts one function name and digest plus only statements from inside its body. Do not repeat the declaration or outer braces. Local named helpers and anonymous functions remain valid.
 
-Neither tool accepts a path. The implementation path is derived from the locked Project Contract as `R/<function>.R`; functions absent from that contract are outside the capability. Built-in shell, edit, and write tools remain disabled.
+Neither tool accepts a path. Paths derive from the locked contract as `R/<function>.R`; absent functions remain outside authority. Scoped edit requests are internally serialized, so the model need not speculate about concurrent Git locks.
+
+## Locked behavior
+
+New Design and Revision proposals give every Approved Function:
+
+- a domain `purpose`; and
+- bounded user-approved `requirements`, including relevant missing-value, duplicate, coding, cohort, and output rules.
+
+Inspection places those requirements beside the source and digest. A legacy function without them returns `behavior.specified = false` and cannot be edited. The agent must ask the user to enter `/r revise`; it must not infer rules from column names, observed values, or remembered conversation.
+
+Changing purpose or requirements during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
 
 ## Validation and policy
 
-Every candidate is created without mutating source, formatted with the pinned formatter, parsed by Tree-sitter and a fresh base-R process, and checked against the locked name and parameter list. Local named helpers and anonymous functions are valid inside an Approved Function body.
+Every candidate is created without mutating source, formatted with the pinned formatter, parsed by Tree-sitter and a fresh base-R process, and checked against the locked name and parameters. Policy `pi-r-policy-v1` rejects package loading/installation, source loading, `setwd()`, namespace operators, and explicit data.frame/tibble construction or conversion.
 
-Policy version `pi-r-policy-v1` rejects:
+Call `r_function_inspect` immediately before editing and pass its `sourceHash`. A stale digest, unspecified behavior, tracked drift, invalid edit shape or syntax, formatting failure, policy violation, scope violation, or runtime incompatibility creates neither a file change nor a commit.
 
-- package loading or installation;
-- `source()` and related source loading;
-- `setwd()`;
-- `::` and `:::` namespace operators; and
-- explicit `data.frame`/tibble construction or conversion.
-
-The policy walks parsed R expressions, including local functions and default expressions, rather than matching source text.
-
-## Mutation and provenance
-
-Call `r_function_inspect` immediately before editing and pass its `sourceHash` to `r_function_edit`. pi-r adds the braces, formats the statements, and validates the complete candidate. A stale digest, tracked source drift, invalid edit shape, invalid syntax, formatting failure, policy violation, scope violation, or runtime incompatibility creates neither a file change nor a commit. Non-retryable infrastructure errors explicitly tell the agent to stop changing candidate code and report the runtime problem.
-
-A successful edit atomically replaces only the Approved Function file and creates exactly one commit. The result contains the final formatted diff and commit hash. Commit trailers record:
-
-- `Capability: r-function-body-edit-v1`;
-- `Contract-Hash` and `Contract-Version`; and
-- `Policy-Version`.
-
-The Workbench Session persists the resulting HEAD before another scoped mutation can run.
+A successful edit atomically replaces only that file and creates one commit. The model-facing result is concise: function, path, commit, and the locked checklist still requiring target execution and artifact inspection. The complete formatted diff remains in tool details rather than being duplicated into model context. Commit trailers record capability, contract hash/version, and policy version.

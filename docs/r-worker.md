@@ -37,9 +37,9 @@ Evaluation returns:
 - a recoverable structured R error; and
 - worker startup and transient-loss status.
 
-Lists are recursively summarized with entry/depth limits. Tables report dimensions, paginated schema, and explicitly selected summaries without rows. Strings, entry counts, columns, protocol frames, and model-facing JSON all have independent bounds.
+Lists are recursively summarized with entry/depth limits. Named vectors preserve name/value entries, frequency tables preserve value/count entries, and matrices/arrays preserve dimensions, dimension labels, and bounded indexed cells instead of flattening. Tables report dimensions, paginated schema, blanks separately from missing values, bounded top values with a completeness flag, and explicitly selected summaries without rows. Strings, entry counts, columns, protocol frames, and model-facing JSON all have independent bounds.
 
-The extension projects bounded object inventory through the non-persistent [Current-State HUD](workbench-session.md#current-state-hud). Routine tool results do not repeat that inventory. Model-facing output is capped at approximately 8 KiB; the live-state projection is capped at 4 KiB and 50 displayed objects.
+The extension projects bounded object inventory through the non-persistent [Current-State HUD](workbench-session.md#current-state-hud). Routine tool results do not repeat that inventory. Duplicate compatibility fields such as raw atomic `value` and JSON-encoded `preview` remain internal details and are omitted from model-facing results. Model-facing output is capped at approximately 8 KiB; the live-state projection is capped at 4 KiB and 50 displayed objects.
 
 Worker responses use explicit `PI_R_RESPONSE:` framing, so unexpected stdout becomes diagnostics rather than protocol JSON. Each process writes a mode-0600 log under `.pi/tmp/pi-r-worker/`. Crash errors and `r_worker_status` expose bounded diagnostic tails and the log path.
 

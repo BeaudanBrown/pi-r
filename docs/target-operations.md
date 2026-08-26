@@ -21,6 +21,8 @@ An empty implicit selection, mixed explicit/all selection, or unknown name fails
 
 The Bubblewrap runner mounts project and attached source read-only. Its local `_targets/` store and `/tmp` are writable. A file target may also write the exact project-local output path declared by its explicit Project Contract `output: { parameter, constant }` binding. Legacy locked contracts using an inferred path parameter remain readable. Canonicalization rejects traversal, symbolic or hard links, internal runtime paths, and tracked source. The sole tracked-path exception is the same target's contract-declared versioned deliverable. Execution may update those bytes but never stages or commits them; publication remains the user-only [`/r publish`](deliverable-publication.md) boundary.
 
+A successful run also returns a deterministic verification checklist for every reachable produced target: producer purpose, locked behavioral requirements, Artifact Kind, and whether behavior is specified. The run does not claim those requirements passed; the agent must inspect each current artifact and compare it with every listed requirement before claiming implementation complete. Legacy unspecified behavior is reported explicitly.
+
 Target runs use the generated pipeline's `workspace_on_error = TRUE`. A failure returns `TARGET_RUN_FAILED`, the failed target identity, a bounded message and traceback, recovery operations, target statuses, and the complete log path. Results remain structured rather than throwing away diagnostic metadata.
 
 ## Failed-workspace diagnosis

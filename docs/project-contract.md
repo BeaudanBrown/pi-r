@@ -6,7 +6,7 @@ See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.y
 
 ## Contract rules
 
-- Every approved function lists only required parameter names. Defaults and variadic arguments are not representable.
+- Every Approved Function lists required parameter names plus a user-approved `purpose` and one or more behavioral `requirements`; bodies, defaults, and variadic arguments are not representable. Requirements record relevant missing-value, duplicate, coding, cohort, and output rules instead of leaving implementation to infer them from names or observed values. Legacy locked contracts without these fields remain readable but their functions cannot be edited until a user-approved Contract Revision supplies them.
 - Every ordinary target calls exactly one Approved Function. Its named arguments plus any explicit generated-file output binding exactly match that function's parameters. Package calls such as `data.table::fread()` belong inside an Approved Function body, not directly in the target declaration.
 - Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
 - Target references must form an acyclic graph.
@@ -33,7 +33,7 @@ Generation writes these **Machine-Owned Files**:
 
 Generated pipelines enable `workspace_on_error`, allowing the controlled runner to retain failed target inputs for temporary diagnosis.
 
-Their complete contents must match the contract. Each Approved Function also gets one `R/<name>.R` file whose initial body fails closed with `stop("Not implemented")`; unfinished functions are never silently generated as identity operations. Only its body is implementation-owned; all bytes outside that Tree-sitter body range remain contract-owned. Contract Revision preserves implemented bodies when names and signatures remain unchanged, stubs new or signature-changed functions, and removes functions deleted by the approved revision.
+Their complete contents must match the contract. Each Approved Function also gets one `R/<name>.R` file whose initial body fails closed with `stop("Not implemented")`; unfinished functions are never silently generated as identity operations. Only its body is implementation-owned; all bytes outside that Tree-sitter body range remain contract-owned. Contract Revision preserves implemented bodies only when names, signatures, purpose, and requirements remain unchanged. New, signature-changed, or behavior-changed functions return to fail-closed stubs; deleted functions are removed.
 
 The generated `pi-r.yml` is canonical JSON with a YAML extension. JSON is valid YAML 1.2, and this representation makes semantically identical input formatting converge to byte-identical locked contracts.
 
