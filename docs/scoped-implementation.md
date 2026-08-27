@@ -1,9 +1,9 @@
 # Scoped Approved Function implementation
 
-After `/r lock`, Implementation Mode replaces contract proposal with two narrow tools:
+After `/r lock`, Implementation Mode replaces contract proposal with narrow inspection and edit tools. The Operator Status Widget reports effective `scopes` separately from `behavior-blocked`; a legacy contract may run existing targets but exposes no edit capability when every function is blocked.
 
-- `r_function_inspect` accepts 1–20 Approved Function names. Use `sourceLimit=0` for compact batch status; requirements and source are omitted there. Immediately before editing, request one function with `sourceOffset` and a source page of at most 3,000 characters. The result provides pagination metadata and a digest of the complete source.
-- `r_function_edit` accepts one function name and digest plus only statements from inside its body. Do not repeat the declaration or outer braces. Local named helpers and anonymous functions remain valid.
+- `r_function_inspect` accepts 1–20 Approved Function names. `sourceLimit=0` returns compact status without source or digests and raises one top-level behavior blocker when applicable. Immediately before editing, request one behavior-specified function with `sourceOffset` and a source page of at most 3,000 characters.
+- `r_function_edit` accepts that same function and digest plus only statements from inside its body. The runtime grants exactly one immediate inspect-to-edit sequence; another inspection or edit invalidates the prior grant. Edits must never be parallel. Do not repeat the declaration or outer braces. Local named helpers and anonymous functions remain valid.
 
 Neither tool accepts a path. Paths derive from the locked contract as `R/<function>.R`; absent functions remain outside authority. Scoped edit requests are internally serialized, so the model need not speculate about concurrent Git locks.
 
@@ -14,7 +14,7 @@ New Design and Revision proposals give every Approved Function:
 - a domain `purpose`; and
 - bounded user-approved `requirements`, including relevant missing-value, duplicate, coding, cohort, and output rules.
 
-Inspection places those requirements beside the source and digest. A legacy function without them returns `behavior.specified = false` and cannot be edited. The agent must ask the user to enter `/r revise`; it must not infer rules from column names, observed values, or remembered conversation.
+Inspection places those requirements beside a single-function source page and digest. Compact inspection omits digests so it cannot authorize edits. A legacy function returns one `BEHAVIOR_UNSPECIFIED` blocker and cannot be edited. The agent must stop implementation planning and ask the user to enter `/r revise`; it must not inspect data, draft bodies, or turn names, observed values, remembered conversation, or a generic implementation request into behavioral approval.
 
 Changing purpose or requirements during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
 
@@ -22,6 +22,6 @@ Changing purpose or requirements during Contract Revision invalidates the prior 
 
 Every candidate is created without mutating source, formatted with the pinned formatter, parsed by Tree-sitter and a fresh base-R process, and checked against the locked name and parameters. Policy `pi-r-policy-v1` rejects package loading/installation, source loading, `setwd()`, namespace operators, and explicit data.frame/tibble construction or conversion.
 
-Call `r_function_inspect` immediately before editing and pass its `sourceHash`. A stale digest, unspecified behavior, tracked drift, invalid edit shape or syntax, formatting failure, policy violation, scope violation, or runtime incompatibility creates neither a file change nor a commit.
+Call a positive-source, one-function `r_function_inspect` immediately before each edit and pass its `sourceHash`. A stale digest, unspecified behavior, tracked drift, invalid edit shape or syntax, formatting failure, policy violation, scope violation, or runtime incompatibility creates neither a file change nor a commit.
 
 A successful edit atomically replaces only that file and creates one commit. The model-facing result is concise: function, path, commit, and the locked checklist still requiring target execution and artifact inspection. The complete formatted diff remains in tool details rather than being duplicated into model context. Commit trailers record capability, contract hash/version, and policy version.
