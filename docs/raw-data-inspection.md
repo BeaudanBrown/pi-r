@@ -12,8 +12,10 @@ A request supplies:
 - an optional key; and
 - an optional comparison path when key overlap is required.
 
-The tool returns byte and row counts, one explicit schema page with `nextOffset`, whole-file summaries for requested columns, missing requested names, key missingness/cardinality/duplicate-row count, and optional cross-file unique-key overlap. It never returns rows by default.
+The tool returns byte and row counts, one explicit schema page with `nextOffset`, whole-file summaries for requested columns—including explicit `nonMissingUnique`, `distinctIncludingMissing`, missing/blank counts, and bounded value/count `top` entries for numeric as well as categorical columns—missing requested names, key missingness/cardinality/duplicate-row count, and optional cross-file unique-key overlap. It never returns rows by default.
 
 Schema inference reads a bounded sample. Whole-file summaries load only explicitly selected columns; key and overlap operations load only the requested key. This keeps wide-file discovery bounded while avoiding manual `fread()` and repeated full-table loads.
+
+`topComplete` appears with `top` and states whether all distinct values, including a separately marked `<missing>` entry when present, fit in the bounded list. Do not reverse-engineer ambiguous or apparently inconsistent tool fields; report the limitation instead.
 
 Treat these results as structural observations. Column names do not establish domain meaning, coding conventions, censoring semantics, or an authorized duplicate-resolution rule. Obtain those decisions from the Project Contract, source documentation, or the user.

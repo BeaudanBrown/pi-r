@@ -1,6 +1,6 @@
 # Project Contract design and lock
 
-An active Design Mode exposes `r_contract_propose`. Its parameters are the complete Project Contract decision schema. Each call performs strict schema and semantic validation and, on success, atomically replaces the session's single draft at `.pi/tmp/pi-r-contract-draft.json`. Before proposing, the agent inspects the draft through paginated `r_contract_draft_inspect`, which reports actual topology differences and stable unresolved decision IDs. It must ask the operator self-contained questions, use bounded structural observations only to sharpen those questions, and distinguish explicit user decisions or authoritative documentation from observations. An implementation request is not behavioral approval.
+An active Design Mode exposes `r_contract_propose`. Its parameters are the complete Project Contract decision schema. Each call performs strict schema and semantic validation and, on success, atomically replaces the session's single draft at `.pi/tmp/pi-r-contract-draft.json`. Before proposing, the agent uses `r_contract_draft_inspect` overview to summarize up to five functions at once and function detail only when preparing questions. It reports actual topology differences and distinguishes missing review fields from genuine operator decisions. It must ask the operator self-contained questions, use bounded structural observations only to sharpen those questions, and distinguish explicit user decisions or authoritative documentation from observations. An implementation request is not behavioral approval.
 
 The draft is excluded through the repository's local Git exclude file, so proposing or revising it does not alter committed source. Invalid proposals leave the previous valid draft intact and return the validator diagnostic.
 
@@ -10,11 +10,11 @@ The draft is excluded through the repository's local Git exclude file, so propos
 /r lock
 ```
 
-Lock first rejects any Approved Function lacking purpose, requirements, evidence, or a non-placeholder review of every behavioral category; legacy contracts remain readable but cannot be relocked unchanged. It then displays `R:locking` progress while it revalidates the Workbench Session and draft, checks source authority, resolves packages, realises the exact Nix/R environment, loads namespaces, probes the sandboxed worker, and prepares the approval diff. Completion or cancellation reports elapsed time. The environment validation process reports its own immutable `Rscript` path, avoiding a second `nix develop` used only for runtime discovery.
+Lock first rejects any Approved Function lacking purpose, requirements, structured decisions, verified evidence, or a non-placeholder review of every behavioral category; legacy contracts remain readable but cannot be relocked unchanged. It then displays `R:locking` progress while it revalidates the Workbench Session and draft, checks source authority, resolves packages, realises the exact Nix/R environment, loads namespaces, probes the sandboxed worker, and prepares the approval diff. Completion or cancellation reports elapsed time. The environment validation process reports its own immutable `Rscript` path, avoiding a second `nix develop` used only for runtime discovery.
 
 Before asking for confirmation, lock rejects tracked source changes. The confirmation contains:
 
-- Approved Function names, parameters, purpose, requirements, complete category review, and evidence basis;
+- Approved Function names, parameters, purpose, requirements, complete category review, structured high-risk decisions, and evidence basis;
 - canonical constants;
 - R package dependencies;
 - the target dependency graph, Artifact Kinds, and Dynamic Patterns; and

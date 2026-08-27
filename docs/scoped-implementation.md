@@ -14,11 +14,12 @@ New Design and Revision proposals give every Approved Function:
 - a domain `purpose`;
 - bounded user-approved `requirements`;
 - a rule or not-applicable rationale for every behavior-review category; and
-- durable user-decision, authoritative-source, or project-policy evidence.
+- structured missing/output and applicable duplicate/coding/join/event decisions; and
+- durable user-decision, authoritative-source, or project-policy evidence. User decisions carry the recorded question, exact answer quote, and message hash.
 
 Inspection places those requirements beside a single-function source page and digest. Compact inspection omits digests so it cannot authorize edits. A legacy function returns one `BEHAVIOR_UNSPECIFIED` blocker and cannot be edited. The agent must stop implementation planning and ask the user to enter `/r revise`; it must not inspect data, draft bodies, or turn names, observed values, remembered conversation, or a generic implementation request into behavioral approval.
 
-Changing purpose, requirements, review, or evidence during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
+Changing purpose, requirements, review, structured decisions, or evidence during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
 
 ## Validation and policy
 
