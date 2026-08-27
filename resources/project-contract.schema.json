@@ -142,8 +142,26 @@
               "required": ["kind", "reference"],
               "properties": {
                 "kind": { "enum": ["user-decision", "authoritative-source", "project-policy"] },
-                "reference": { "type": "string", "minLength": 1, "maxLength": 300 }
+                "reference": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "decisionId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,99}$" },
+                "question": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                "questionHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                "answer": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                "messageHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
               }
+            }
+          },
+          "behaviorDecisions": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["missingValues", "output"],
+            "properties": {
+              "missingValues": { "type": "object", "additionalProperties": false, "required": ["policy", "tokens"], "properties": { "policy": { "type": "string", "minLength": 1, "maxLength": 300 }, "tokens": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 100 } } } },
+              "duplicates": { "type": "object", "additionalProperties": false, "required": ["policy", "orderingBasis"], "properties": { "policy": { "type": "string", "minLength": 1, "maxLength": 300 }, "orderingBasis": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+              "categoricalCoding": { "type": "object", "additionalProperties": false, "required": ["dictionarySource", "unknownCodePolicy"], "properties": { "dictionarySource": { "type": "string", "minLength": 1, "maxLength": 300 }, "unknownCodePolicy": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+              "joins": { "type": "object", "additionalProperties": false, "required": ["type", "keys", "unmatchedLeft", "unmatchedRight"], "properties": { "type": { "type": "string", "minLength": 1, "maxLength": 100 }, "keys": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "maxLength": 100 } }, "unmatchedLeft": { "type": "string", "minLength": 1, "maxLength": 300 }, "unmatchedRight": { "type": "string", "minLength": 1, "maxLength": 300 } } },
+              "eventsTime": { "type": "object", "additionalProperties": false, "required": ["eventDefinition", "dateColumns", "censoringDefinition"], "properties": { "eventDefinition": { "type": "string", "minLength": 1, "maxLength": 500 }, "dateColumns": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 100 } }, "censoringDefinition": { "type": "string", "minLength": 1, "maxLength": 500 } } },
+              "output": { "type": "object", "additionalProperties": false, "required": ["columnPolicy", "columns", "key", "ordering"], "properties": { "columnPolicy": { "type": "string", "minLength": 1, "maxLength": 300 }, "columns": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 100 } }, "key": { "type": "array", "maxItems": 20, "items": { "type": "string", "maxLength": 100 } }, "ordering": { "type": "string", "minLength": 1, "maxLength": 300 } } }
             }
           }
         }

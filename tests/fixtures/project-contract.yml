@@ -34,8 +34,17 @@ functions:
       ordering-uniqueness: Preserve input ordering; no uniqueness claim is made
       side-effects: Do not mutate the input path
     behaviorEvidence: &fixture_evidence
-      - kind: user-decision
+      - kind: project-policy
         reference: Deterministic fixture specification
+    behaviorDecisions: &fixture_decisions
+      missingValues:
+        policy: Preserve missing values unless a requirement states otherwise
+        tokens: []
+      output:
+        columnPolicy: Preserve all columns required by the function requirement
+        columns: []
+        key: []
+        ordering: Preserve deterministic input order
   - name: make_config
     parameters: [threshold]
     purpose: Construct the analysis configuration
@@ -43,6 +52,7 @@ functions:
       - Preserve threshold as a finite scalar
     behaviorReview: *complete_review
     behaviorEvidence: *fixture_evidence
+    behaviorDecisions: *fixture_decisions
   - name: summarise_groups
     parameters: [input, config]
     purpose: Produce the approved grouped summaries
@@ -50,6 +60,7 @@ functions:
       - Return a data.table with deterministic grouping
     behaviorReview: *complete_review
     behaviorEvidence: *fixture_evidence
+    behaviorDecisions: *fixture_decisions
   - name: write_result
     parameters: [table, config, output_path]
     purpose: Write the approved summary artifact
@@ -57,6 +68,7 @@ functions:
       - Write only output_path and return that exact path
     behaviorReview: *complete_review
     behaviorEvidence: *fixture_evidence
+    behaviorDecisions: *fixture_decisions
 targets:
   - name: raw_data
     function: load_input

@@ -19,12 +19,21 @@ pi_r_bound_string <- function(value, max_bytes = 1000L) {
 
 pi_r_column_summary <- function(column, name) {
   counts <- sort(table(column, useNA = "ifany"), decreasing = TRUE)
+  bounded_counts <- head(counts, 10L)
+  count_names <- names(bounded_counts)
+  top <- unname(lapply(seq_along(count_names), function(index) list(
+    value = if (is.na(count_names[[index]])) "<missing>" else pi_r_bound_string(count_names[[index]], 200L),
+    count = unname(bounded_counts[[index]]),
+    missing = is.na(count_names[[index]])
+  )))
   common <- list(
     name = substr(name, 1L, 200L),
     class = as.list(substr(head(class(column), 4L), 1L, 100L)),
     missing = sum(is.na(column)),
     blank = if (is.character(column)) sum(!is.na(column) & trimws(column) == "") else 0L,
-    unique = length(unique(column)),
+    nonMissingUnique = length(unique(column[!is.na(column)])),
+    distinctIncludingMissing = length(unique(column)),
+    top = top,
     topComplete = length(counts) <= 10L
   )
   if (is.numeric(column)) {
@@ -35,11 +44,7 @@ pi_r_column_summary <- function(column, name) {
       mean = if (length(finite)) mean(finite) else NULL
     )))
   }
-  count_names <- names(head(counts, 10L))
-  c(common, list(top = unname(lapply(seq_along(count_names), function(index) list(
-    value = pi_r_bound_string(count_names[[index]], 200L),
-    count = unname(head(counts, 10L)[[index]])
-  )))))
+  common
 }
 
 pi_r_table_summary <- function(value, columns = character(), column_offset = 0L, column_limit = 20L) {

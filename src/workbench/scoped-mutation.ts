@@ -35,6 +35,7 @@ export interface ApprovedFunctionInspection {
     requirements: string[];
     review: ApprovedFunction["behaviorReview"] | null;
     evidence: ApprovedFunction["behaviorEvidence"];
+    decisions: ApprovedFunction["behaviorDecisions"] | null;
     agentAction: string;
   };
 }
@@ -199,6 +200,7 @@ export async function inspectApprovedFunctions(
         requirements: approved.requirements ?? [],
         review: approved.behaviorReview ?? null,
         evidence: approved.behaviorEvidence ?? [],
+        decisions: approved.behaviorDecisions ?? null,
         agentAction: specified
           ? "Implement only the locked purpose and requirements"
           : "Legacy behavior is unspecified; ask the user for requirements before inventing domain rules",

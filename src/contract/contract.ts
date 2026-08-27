@@ -7,6 +7,7 @@ import {
   ARTIFACT_KINDS,
   BEHAVIOR_REVIEW_CATEGORIES,
   PATTERN_KINDS,
+  type BehaviorDecisions,
   type BehaviorEvidence,
   type ArgumentReference,
   type ConstantValue,
@@ -288,6 +289,9 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
       if (!Array.isArray(candidate.behaviorEvidence) || candidate.behaviorEvidence.length === 0) {
         issues.push(`functions[${index}].behaviorEvidence: new proposals must identify user, source, or policy evidence`);
       }
+      if (!candidate.behaviorDecisions || typeof candidate.behaviorDecisions !== "object" || Array.isArray(candidate.behaviorDecisions)) {
+        issues.push(`functions[${index}].behaviorDecisions: new proposals must state structured high-risk decisions`);
+      }
     });
   }
   if (issues.length > 0) {
@@ -314,7 +318,9 @@ export function unspecifiedBehaviorFunctions(contract: ProjectContract): string[
       !fn.behaviorReview ||
       BEHAVIOR_REVIEW_CATEGORIES.some((category) => !fn.behaviorReview?.[category]) ||
       !Array.isArray(fn.behaviorEvidence) ||
-      fn.behaviorEvidence.length === 0,
+      fn.behaviorEvidence.length === 0 ||
+      fn.behaviorEvidence.some((evidence) => evidence.kind === "user-decision" && (!evidence.decisionId || !evidence.question || !evidence.questionHash || !evidence.answer || !evidence.messageHash)) ||
+      !fn.behaviorDecisions,
     )
     .map((fn) => fn.name);
 }
@@ -324,7 +330,7 @@ export function validateLockableContract(input: unknown): ProjectContract {
   const unspecified = unspecifiedBehaviorFunctions(contract);
   if (unspecified.length > 0) {
     invalid(
-      `contract cannot be locked: ${unspecified.length} Approved Function${unspecified.length === 1 ? "" : "s"} lack purpose or behavioral requirements: ${unspecified.join(", ")}. Use the behavior proposal capability and resolve every missing decision before /r lock`,
+      `contract cannot be locked: ${unspecified.length} Approved Function${unspecified.length === 1 ? "" : "s"} lack complete purpose, requirements, review, structured decisions, or verified evidence: ${unspecified.join(", ")}. Use the behavior proposal capability and resolve every missing decision before /r lock`,
       { code: "BEHAVIOR_INCOMPLETE", functions: unspecified },
     );
   }
@@ -398,7 +404,7 @@ export function validateContract(input: unknown): ProjectContract {
   const functions = functionsInput.map((entry, index) => {
     const fn = object(entry, `functions[${index}]`);
     const path = `functions[${index}]`;
-    exactKeys(fn, ["name", "parameters", "purpose", "requirements", "behaviorReview", "behaviorEvidence"], path);
+    exactKeys(fn, ["name", "parameters", "purpose", "requirements", "behaviorReview", "behaviorEvidence", "behaviorDecisions"], path);
     let requirements: string[] | undefined;
     if (fn.requirements !== undefined) {
       requirements = stringArray(fn.requirements, `${path}.requirements`).map((requirement, requirementIndex) =>
@@ -428,7 +434,7 @@ export function validateContract(input: unknown): ProjectContract {
       behaviorEvidence = fn.behaviorEvidence.map((entry, evidenceIndex) => {
         const evidencePath = `${path}.behaviorEvidence[${evidenceIndex}]`;
         const evidence = object(entry, evidencePath);
-        exactKeys(evidence, ["kind", "reference"], evidencePath);
+        exactKeys(evidence, ["kind", "reference", "decisionId", "question", "questionHash", "answer", "messageHash"], evidencePath);
         const kind = string(evidence.kind, `${evidencePath}.kind`);
         if (!(["user-decision", "authoritative-source", "project-policy"] as const).includes(kind as any)) {
           invalid(`${evidencePath}.kind is not supported`);
@@ -437,11 +443,78 @@ export function validateContract(input: unknown): ProjectContract {
         if (!reference || /^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(reference)) {
           invalid(`${evidencePath}.reference must identify a concrete user decision, authoritative source, or project policy`);
         }
-        return {
-          kind: kind as BehaviorEvidence["kind"],
-          reference,
-        };
+        const decisionFields = ["decisionId", "question", "questionHash", "answer", "messageHash"] as const;
+        if (kind === "user-decision" && decisionFields.some((field) => evidence[field] !== undefined)) {
+          for (const field of decisionFields) {
+            if (evidence[field] === undefined) invalid(`${evidencePath}.${field} is required when user-decision evidence uses structured decision fields`);
+          }
+          const decisionId = boundedString(evidence.decisionId, `${evidencePath}.decisionId`, 100);
+          if (!/^[A-Za-z][A-Za-z0-9._-]{0,99}$/.test(decisionId)) invalid(`${evidencePath}.decisionId is invalid`);
+          const questionHash = boundedString(evidence.questionHash, `${evidencePath}.questionHash`, 71);
+          if (!/^sha256:[0-9a-f]{64}$/.test(questionHash)) invalid(`${evidencePath}.questionHash is invalid`);
+          const messageHash = boundedString(evidence.messageHash, `${evidencePath}.messageHash`, 71);
+          if (!/^sha256:[0-9a-f]{64}$/.test(messageHash)) invalid(`${evidencePath}.messageHash is invalid`);
+          return {
+            kind,
+            reference,
+            decisionId,
+            question: boundedString(evidence.question, `${evidencePath}.question`, 1000),
+            questionHash,
+            answer: boundedString(evidence.answer, `${evidencePath}.answer`, 1000),
+            messageHash,
+          };
+        }
+        if (decisionFields.some((field) => evidence[field] !== undefined)) {
+          invalid(`${evidencePath} decision fields are only valid for user-decision evidence`);
+        }
+        return { kind: kind as BehaviorEvidence["kind"], reference };
       });
+    }
+    let behaviorDecisions: BehaviorDecisions | undefined;
+    if (fn.behaviorDecisions !== undefined) {
+      const decisions = object(fn.behaviorDecisions, `${path}.behaviorDecisions`);
+      exactKeys(decisions, ["missingValues", "duplicates", "categoricalCoding", "joins", "eventsTime", "output"], `${path}.behaviorDecisions`);
+      const missingValues = object(decisions.missingValues, `${path}.behaviorDecisions.missingValues`);
+      exactKeys(missingValues, ["policy", "tokens"], `${path}.behaviorDecisions.missingValues`);
+      const output = object(decisions.output, `${path}.behaviorDecisions.output`);
+      exactKeys(output, ["columnPolicy", "columns", "key", "ordering"], `${path}.behaviorDecisions.output`);
+      behaviorDecisions = {
+        missingValues: {
+          policy: boundedString(missingValues.policy, `${path}.behaviorDecisions.missingValues.policy`, 300),
+          tokens: stringArray(missingValues.tokens, `${path}.behaviorDecisions.missingValues.tokens`).map((value, index) => boundedString(value, `${path}.behaviorDecisions.missingValues.tokens[${index}]`, 100)),
+        },
+        output: {
+          columnPolicy: boundedString(output.columnPolicy, `${path}.behaviorDecisions.output.columnPolicy`, 300),
+          columns: stringArray(output.columns, `${path}.behaviorDecisions.output.columns`).map((value, index) => boundedString(value, `${path}.behaviorDecisions.output.columns[${index}]`, 100)),
+          key: stringArray(output.key, `${path}.behaviorDecisions.output.key`).map((value, index) => boundedString(value, `${path}.behaviorDecisions.output.key[${index}]`, 100)),
+          ordering: boundedString(output.ordering, `${path}.behaviorDecisions.output.ordering`, 300),
+        },
+      };
+      if (decisions.duplicates !== undefined) {
+        const value = object(decisions.duplicates, `${path}.behaviorDecisions.duplicates`);
+        exactKeys(value, ["policy", "orderingBasis"], `${path}.behaviorDecisions.duplicates`);
+        behaviorDecisions.duplicates = { policy: boundedString(value.policy, `${path}.behaviorDecisions.duplicates.policy`, 300), orderingBasis: boundedString(value.orderingBasis, `${path}.behaviorDecisions.duplicates.orderingBasis`, 300) };
+      }
+      if (decisions.categoricalCoding !== undefined) {
+        const value = object(decisions.categoricalCoding, `${path}.behaviorDecisions.categoricalCoding`);
+        exactKeys(value, ["dictionarySource", "unknownCodePolicy"], `${path}.behaviorDecisions.categoricalCoding`);
+        behaviorDecisions.categoricalCoding = { dictionarySource: boundedString(value.dictionarySource, `${path}.behaviorDecisions.categoricalCoding.dictionarySource`, 300), unknownCodePolicy: boundedString(value.unknownCodePolicy, `${path}.behaviorDecisions.categoricalCoding.unknownCodePolicy`, 300) };
+      }
+      if (decisions.joins !== undefined) {
+        const value = object(decisions.joins, `${path}.behaviorDecisions.joins`);
+        exactKeys(value, ["type", "keys", "unmatchedLeft", "unmatchedRight"], `${path}.behaviorDecisions.joins`);
+        behaviorDecisions.joins = { type: boundedString(value.type, `${path}.behaviorDecisions.joins.type`, 100), keys: stringArray(value.keys, `${path}.behaviorDecisions.joins.keys`).map((item, index) => boundedString(item, `${path}.behaviorDecisions.joins.keys[${index}]`, 100)), unmatchedLeft: boundedString(value.unmatchedLeft, `${path}.behaviorDecisions.joins.unmatchedLeft`, 300), unmatchedRight: boundedString(value.unmatchedRight, `${path}.behaviorDecisions.joins.unmatchedRight`, 300) };
+      }
+      if (decisions.eventsTime !== undefined) {
+        const value = object(decisions.eventsTime, `${path}.behaviorDecisions.eventsTime`);
+        exactKeys(value, ["eventDefinition", "dateColumns", "censoringDefinition"], `${path}.behaviorDecisions.eventsTime`);
+        behaviorDecisions.eventsTime = { eventDefinition: boundedString(value.eventDefinition, `${path}.behaviorDecisions.eventsTime.eventDefinition`, 500), dateColumns: stringArray(value.dateColumns, `${path}.behaviorDecisions.eventsTime.dateColumns`).map((item, index) => boundedString(item, `${path}.behaviorDecisions.eventsTime.dateColumns[${index}]`, 100)), censoringDefinition: boundedString(value.censoringDefinition, `${path}.behaviorDecisions.eventsTime.censoringDefinition`, 500) };
+      }
+      const applicable = (category: (typeof BEHAVIOR_REVIEW_CATEGORIES)[number]) => behaviorReview && !/^not applicable\b/i.test(behaviorReview[category].trim());
+      if (applicable("duplicates") && !behaviorDecisions.duplicates) invalid(`${path}.behaviorDecisions.duplicates is required by the duplicates review`);
+      if (applicable("categorical-coding") && !behaviorDecisions.categoricalCoding) invalid(`${path}.behaviorDecisions.categoricalCoding is required by the categorical-coding review`);
+      if (applicable("joins") && !behaviorDecisions.joins) invalid(`${path}.behaviorDecisions.joins is required by the joins review`);
+      if (applicable("events-time") && !behaviorDecisions.eventsTime) invalid(`${path}.behaviorDecisions.eventsTime is required by the events-time review`);
     }
     return {
       name: rName(fn.name, `${path}.name`),
@@ -450,6 +523,7 @@ export function validateContract(input: unknown): ProjectContract {
       ...(requirements ? { requirements } : {}),
       ...(behaviorReview ? { behaviorReview } : {}),
       ...(behaviorEvidence ? { behaviorEvidence } : {}),
+      ...(behaviorDecisions ? { behaviorDecisions } : {}),
     };
   });
   if (new Set(functions.map((fn) => fn.name)).size !== functions.length) invalid("function names must be unique");

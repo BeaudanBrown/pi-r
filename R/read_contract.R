@@ -13,6 +13,15 @@ contract$functions <- lapply(as_sequence(contract$functions), function(definitio
   definition$parameters <- as_sequence(definition$parameters)
   if (!is.null(definition$requirements)) definition$requirements <- as_sequence(definition$requirements)
   if (!is.null(definition$behaviorEvidence)) definition$behaviorEvidence <- as_sequence(definition$behaviorEvidence)
+  if (!is.null(definition$behaviorDecisions)) {
+    decisions <- definition$behaviorDecisions
+    decisions$missingValues$tokens <- as_sequence(decisions$missingValues$tokens)
+    decisions$output$columns <- as_sequence(decisions$output$columns)
+    decisions$output$key <- as_sequence(decisions$output$key)
+    if (!is.null(decisions$joins)) decisions$joins$keys <- as_sequence(decisions$joins$keys)
+    if (!is.null(decisions$eventsTime)) decisions$eventsTime$dateColumns <- as_sequence(decisions$eventsTime$dateColumns)
+    definition$behaviorDecisions <- decisions
+  }
   definition
 })
 contract$targets <- lapply(as_sequence(contract$targets), function(definition) {

@@ -33,6 +33,20 @@ export type BehaviorEvidenceKind = "user-decision" | "authoritative-source" | "p
 export interface BehaviorEvidence {
   kind: BehaviorEvidenceKind;
   reference: string;
+  decisionId?: string;
+  question?: string;
+  questionHash?: string;
+  answer?: string;
+  messageHash?: string;
+}
+
+export interface BehaviorDecisions {
+  missingValues: { policy: string; tokens: string[] };
+  duplicates?: { policy: string; orderingBasis: string };
+  categoricalCoding?: { dictionarySource: string; unknownCodePolicy: string };
+  joins?: { type: string; keys: string[]; unmatchedLeft: string; unmatchedRight: string };
+  eventsTime?: { eventDefinition: string; dateColumns: string[]; censoringDefinition: string };
+  output: { columnPolicy: string; columns: string[]; key: string[]; ordering: string };
 }
 
 export interface ApprovedFunction {
@@ -42,6 +56,7 @@ export interface ApprovedFunction {
   requirements?: string[];
   behaviorReview?: Record<BehaviorReviewCategory, string>;
   behaviorEvidence?: BehaviorEvidence[];
+  behaviorDecisions?: BehaviorDecisions;
 }
 
 export type ArgumentReference = { target: string } | { constant: string };
