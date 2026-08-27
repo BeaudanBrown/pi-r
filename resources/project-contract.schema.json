@@ -83,6 +83,7 @@
     },
     "functions": {
       "type": "array",
+      "maxItems": 200,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -90,7 +91,7 @@
         "properties": {
           "name": {
             "$ref": "#/$defs/rName",
-            "description": "Approved Function name. The contract declares only its signature; locking creates a fail-closed body stub."
+            "description": "Approved Function name. The contract declares signature and reviewed observable behavior but no R body; locking creates a fail-closed body stub."
           },
           "parameters": {
             "type": "array",
@@ -111,6 +112,39 @@
             "uniqueItems": true,
             "description": "User-approved behavioral requirements, including relevant missing-value, duplicate, coding, cohort, and output rules. Requirements contain no R body code.",
             "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+          },
+          "behaviorReview": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["input-shape", "missing-values", "duplicates", "numeric-parsing", "categorical-coding", "cohort", "joins", "events-time", "output-schema", "ordering-uniqueness", "side-effects"],
+            "properties": {
+              "input-shape": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "missing-values": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "duplicates": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "numeric-parsing": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "categorical-coding": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "cohort": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "joins": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "events-time": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "output-schema": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "ordering-uniqueness": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "side-effects": { "type": "string", "minLength": 1, "maxLength": 300 }
+            },
+            "description": "Complete review of every behavior category. Each value states the locked rule or why the category is not applicable. Unresolved placeholders are prohibited."
+          },
+          "behaviorEvidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "reference"],
+              "properties": {
+                "kind": { "enum": ["user-decision", "authoritative-source", "project-policy"] },
+                "reference": { "type": "string", "minLength": 1, "maxLength": 300 }
+              }
+            }
           }
         }
       }

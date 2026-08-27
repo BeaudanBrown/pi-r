@@ -13,11 +13,35 @@ export interface NixpkgsPin {
   lastModified: number;
 }
 
+export const BEHAVIOR_REVIEW_CATEGORIES = [
+  "input-shape",
+  "missing-values",
+  "duplicates",
+  "numeric-parsing",
+  "categorical-coding",
+  "cohort",
+  "joins",
+  "events-time",
+  "output-schema",
+  "ordering-uniqueness",
+  "side-effects",
+] as const;
+
+export type BehaviorReviewCategory = (typeof BEHAVIOR_REVIEW_CATEGORIES)[number];
+export type BehaviorEvidenceKind = "user-decision" | "authoritative-source" | "project-policy";
+
+export interface BehaviorEvidence {
+  kind: BehaviorEvidenceKind;
+  reference: string;
+}
+
 export interface ApprovedFunction {
   name: string;
   parameters: string[];
   purpose?: string;
   requirements?: string[];
+  behaviorReview?: Record<BehaviorReviewCategory, string>;
+  behaviorEvidence?: BehaviorEvidence[];
 }
 
 export type ArgumentReference = { target: string } | { constant: string };

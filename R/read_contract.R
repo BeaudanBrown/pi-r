@@ -12,6 +12,7 @@ contract$dependencies <- as_sequence(contract$dependencies)
 contract$functions <- lapply(as_sequence(contract$functions), function(definition) {
   definition$parameters <- as_sequence(definition$parameters)
   if (!is.null(definition$requirements)) definition$requirements <- as_sequence(definition$requirements)
+  if (!is.null(definition$behaviorEvidence)) definition$behaviorEvidence <- as_sequence(definition$behaviorEvidence)
   definition
 })
 contract$targets <- lapply(as_sequence(contract$targets), function(definition) {

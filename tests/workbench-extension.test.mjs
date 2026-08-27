@@ -22,6 +22,21 @@ async function fixtureContract() {
   return JSON.parse(await readFile(join(output, "pi-r.yml"), "utf8"));
 }
 
+const completeBehaviorReview = {
+  "input-shape": "Input shape is specified by parameters and requirements",
+  "missing-values": "Preserve missing values unless requirements state otherwise",
+  duplicates: "Not applicable unless requirements define duplicate handling",
+  "numeric-parsing": "Not applicable unless requirements define numeric parsing",
+  "categorical-coding": "Not applicable unless requirements define categorical coding",
+  cohort: "Not applicable unless requirements define cohort selection",
+  joins: "Not applicable unless requirements define joins",
+  "events-time": "Not applicable unless requirements define event or time derivation",
+  "output-schema": "Output artifact and requirements define the observable result",
+  "ordering-uniqueness": "No ordering or uniqueness guarantee beyond requirements",
+  "side-effects": "No side effects beyond explicitly declared file output",
+};
+const fixtureBehaviorEvidence = [{ kind: "user-decision", reference: "Deterministic test fixture specification" }];
+
 function proposalForContract(contract) {
   const {
     contractVersion: _contractVersion,
@@ -36,6 +51,8 @@ function proposalForContract(contract) {
       ...fn,
       purpose: fn.purpose ?? `Test purpose for ${fn.name}`,
       requirements: fn.requirements ?? ["Return a deterministic value matching the declared target artifact"],
+      behaviorReview: fn.behaviorReview ?? completeBehaviorReview,
+      behaviorEvidence: fn.behaviorEvidence ?? fixtureBehaviorEvidence,
     })),
   };
 }
@@ -53,8 +70,8 @@ async function targetOperationsContract() {
     deliverables: [{ target: "answer", path: "artifacts/answer.txt" }],
     constants: { seed: 41, output_path: "artifacts/answer.txt", source_path: "analysis.R" },
     functions: [
-      { name: "write_answer", parameters: ["seed", "output_path"], purpose: "Write the approved answer file", requirements: ["Write seed plus one and return output_path"] },
-      { name: "fail_target", parameters: ["answer", "source_path"], purpose: "Exercise failed target diagnostics", requirements: ["Attempt to write only source_path"] },
+      { name: "write_answer", parameters: ["seed", "output_path"], purpose: "Write the approved answer file", requirements: ["Write seed plus one and return output_path"], behaviorReview: completeBehaviorReview, behaviorEvidence: fixtureBehaviorEvidence },
+      { name: "fail_target", parameters: ["answer", "source_path"], purpose: "Exercise failed target diagnostics", requirements: ["Attempt to write only source_path"], behaviorReview: completeBehaviorReview, behaviorEvidence: fixtureBehaviorEvidence },
     ],
     targets: [
       {
@@ -82,7 +99,7 @@ async function tableArtifactProject() {
     dependencies: ["data.table"],
     constants: { seed: 10 },
     functions: [
-      { name: "make_table", parameters: ["seed"], purpose: "Create the fixture table", requirements: ["Return two rows keyed by value"] },
+      { name: "make_table", parameters: ["seed"], purpose: "Create the fixture table", requirements: ["Return two rows keyed by value"], behaviorReview: completeBehaviorReview, behaviorEvidence: fixtureBehaviorEvidence },
       { name: "make_object", parameters: ["seed"] },
     ],
     targets: [
@@ -126,8 +143,8 @@ async function tableArtifactProject() {
   await execFileAsync(process.env.PI_R_WORKER_RSCRIPT, ["--vanilla", "-e", "targets::tar_make(reporter = 'silent', callr_function = NULL)"], { cwd: root, timeout: 30_000 });
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
-    version: 3,
-    runtimeVersion: "0.21.0",
+    version: 4,
+    runtimeVersion: "0.22.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -137,6 +154,7 @@ async function tableArtifactProject() {
     policyState: "pi-r-policy-v1",
     editableScopeCount: 1,
     behaviorBlockedCount: 1,
+    topologyChanged: false,
     pendingApproval: "none",
     workerState: "stopped",
     readOnlyRoots: [],
@@ -273,7 +291,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.equal(h.appended[0].customType, "pi-r-workbench-state");
   assert.equal(h.appended[0].data.phase, "design");
   assert.deepEqual(h.appended[0].data.readOnlyRoots, [await realpath(attached)]);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
   const patterns = h.tools.flatMap((tool) => schemaPatterns(tool.parameters));
   assert.ok(patterns.length > 0);
   assert.equal(patterns.every((pattern) => pattern.startsWith("^") && pattern.endsWith("$")), true, `local llama.cpp requires anchored JSON Schema patterns: ${patterns.join(", ")}`);
@@ -305,7 +323,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" },
   );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.21\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.22\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -781,7 +799,8 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   const proposalInput = proposalForContract((contract));
   const proposed = await proposal.execute("proposal-1", proposalInput, undefined, undefined, ctx);
 
-  assert.match(proposed.content[0].text, /Functions and signatures[\s\S]*Target graph/);
+  assert.equal(JSON.parse(proposed.content[0].text).status, "draft-accepted");
+  assert.match(proposed.details.summary, /Functions and signatures[\s\S]*Target graph/);
   assert.equal(await git(root, "check-ignore", ".pi/tmp/pi-r-contract-draft.json"), ".pi/tmp/pi-r-contract-draft.json");
   assert.equal(await git(root, "status", "--porcelain"), "");
   const draftBeforeInvalid = await readFile(join(root, ".pi/tmp/pi-r-contract-draft.json"), "utf8");
@@ -842,6 +861,8 @@ test("Source File Target authority rejects canonical output aliases and post-loc
       parameters: ["source", "output_path"],
       purpose: "Copy one approved source file to one approved output",
       requirements: ["Write only output_path and return that exact path"],
+      behaviorReview: completeBehaviorReview,
+      behaviorEvidence: fixtureBehaviorEvidence,
     }],
     targets: [
       { name: "source_file", artifact: "file", arguments: {}, source: { constant: "source_path" } },
@@ -941,6 +962,8 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
     parameters: ["seed"],
     purpose: "Create the approved revision fixture value",
     requirements: ["Return seed unchanged"],
+    behaviorReview: completeBehaviorReview,
+    behaviorEvidence: fixtureBehaviorEvidence,
   });
   revised.targets.push({
     name: "revision_value",
@@ -950,6 +973,16 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
   });
   await h.tools.find((tool) => tool.name === "r_contract_propose")
     .execute("revision", revised, undefined, undefined, ctx);
+  const revisedDraft = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
+    "inspect-revised-draft",
+    { functionOffset: 0, functionLimit: 20 },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(revisedDraft.details.status, "ready-for-user-lock-review");
+  assert.equal(revisedDraft.details.topology.changed, true);
+  assert.equal(revisedDraft.details.unresolvedDecisionCount, 0);
   await h.commands[0].options.handler("lock", ctx);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(await readFile(join(root, "R/load_input.R"), "utf8"), implemented);
@@ -1512,6 +1545,17 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
 
   await h.commands[0].options.handler("revise", ctx);
   assert.ok(h.activeToolChanges.at(-1).includes("r_function_behavior_propose"));
+  assert.ok(h.activeToolChanges.at(-1).includes("r_contract_draft_inspect"));
+  const draftStatus = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
+    "inspect-legacy-draft",
+    { functionOffset: 0, functionLimit: 20 },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(draftStatus.details.status, "questions-required");
+  assert.equal(draftStatus.details.topology.changed, false);
+  assert.ok(draftStatus.details.unresolvedDecisionIds.includes("make_object:duplicates"));
   await h.commands[0].options.handler("lock", ctx);
   assert.match(ctx.notifications.at(-1)[0], /lock failed:.*make_object.*purpose.*behavioral requirements|lock failed:.*purpose.*behavioral requirement/is);
   assert.equal((await git(root, "branch", "--show-current")), "pi-r/workbench");
@@ -1522,7 +1566,8 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
       name: "make_object",
       purpose: "Return the approved bounded object",
       requirements: ["Return a list containing value equal to seed and label equal to bounded"],
-      basis: "Explicit test operator decision",
+      behaviorReview: completeBehaviorReview,
+      behaviorEvidence: [{ kind: "user-decision", reference: "Explicit test operator decision" }],
     }],
   }, undefined, undefined, ctx);
   assert.equal(proposed.details.status, "ready-for-user-lock-review");
@@ -1533,7 +1578,10 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
   assert.equal(h.appended.at(-1).data.behaviorBlockedCount, 0);
   assert.equal(h.appended.at(-1).data.editableScopeCount, 2);
   const locked = JSON.parse(await readFile(join(root, "pi-r.yml"), "utf8"));
-  assert.equal(locked.functions.find((fn) => fn.name === "make_object").purpose, "Return the approved bounded object");
+  const migrated = locked.functions.find((fn) => fn.name === "make_object");
+  assert.equal(migrated.purpose, "Return the approved bounded object");
+  assert.equal(migrated.behaviorReview.duplicates, completeBehaviorReview.duplicates);
+  assert.deepEqual(migrated.behaviorEvidence, [{ kind: "user-decision", reference: "Explicit test operator decision" }]);
 });
 
 test("implementation mode commits only validated Approved Function body edits", async () => {
@@ -1689,7 +1737,7 @@ test("persisted workbench state resumes only when project and branch still match
   const resumed = harness(entries);
   const resumedContext = context(root, entries);
   await resumed.handlers.get("session_start")({ reason: "resume" }, resumedContext);
-  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
+  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
   await resumed.commands[0].options.handler("status", resumedContext);
   assert.match(resumedContext.notifications.at(-1)[0], /mode=design .*branch=pi-r\/workbench@/);
 
@@ -1699,7 +1747,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.21\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.22\.0.*fresh Pi session/i);
   assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
   const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);

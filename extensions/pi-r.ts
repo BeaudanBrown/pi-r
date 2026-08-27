@@ -10,7 +10,12 @@ import {
   validateLockableContract,
 } from "../src/contract/contract.js";
 import { fileTargetOutputs } from "../src/contract/deliverables.js";
-import { isSourceFileTarget, type NixpkgsPin, type ProjectContract } from "../src/contract/types.js";
+import {
+  BEHAVIOR_REVIEW_CATEGORIES,
+  isSourceFileTarget,
+  type NixpkgsPin,
+  type ProjectContract,
+} from "../src/contract/types.js";
 import { checkScaffold, renderScaffold } from "../src/contract/scaffold.js";
 import { RecoverableError } from "../src/r-edit/errors.js";
 import { inspectApprovedFunctions, prepareScopedMutation } from "../src/workbench/scoped-mutation.js";
@@ -41,7 +46,7 @@ const DATA_TOOL = "r_data_inspect";
 const ENVIRONMENT_TOOL = "r_dependency_propose";
 const SCOUT_TOOL = "r_dependency_scout";
 const LIVE_STATE_MESSAGE = "pi-r-current-state";
-const PI_R_RUNTIME_VERSION = "0.21.0";
+const PI_R_RUNTIME_VERSION = "0.22.0";
 const MAX_LIVE_STATE_BYTES = 4096;
 const MAX_LIVE_OBJECTS = 50;
 const MODEL_R_NAME_PATTERN = "^[A-Za-z.][A-Za-z0-9._]*$";
@@ -58,6 +63,16 @@ function llamaCompatibleSchema(value: unknown): void {
 }
 
 const BEHAVIOR_PROPOSAL_TOOL = "r_function_behavior_propose";
+const DRAFT_INSPECT_TOOL = "r_contract_draft_inspect";
+const DRAFT_INSPECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["functionOffset", "functionLimit"],
+  properties: {
+    functionOffset: { type: "integer", minimum: 0, maximum: 10000 },
+    functionLimit: { type: "integer", minimum: 1, maximum: 20 },
+  },
+} as const;
 const BEHAVIOR_PROPOSAL_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -72,12 +87,13 @@ const BEHAVIOR_PROPOSAL_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "purpose", "requirements", "basis"],
+        required: ["name", "purpose", "requirements", "behaviorReview", "behaviorEvidence"],
         properties: {
           name: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 100 },
           purpose: { type: "string", minLength: 1, maxLength: 500 },
           requirements: { type: "array", minItems: 1, maxItems: 10, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 300 } },
-          basis: { type: "string", minLength: 1, maxLength: 300, description: "User decision or authoritative source establishing these requirements; do not cite observed data as semantic authority." },
+          behaviorReview: structuredClone((contractSchema as any).properties.functions.items.properties.behaviorReview),
+          behaviorEvidence: structuredClone((contractSchema as any).properties.functions.items.properties.behaviorEvidence),
         },
       },
     },
@@ -92,7 +108,7 @@ const CONTRACT_PROPOSAL_SCHEMA = (() => {
   delete schema.properties.policyVersion;
   schema.properties.project.required = ["name"];
   delete schema.properties.project.properties.nixpkgs;
-  schema.properties.functions.items.required = ["name", "parameters", "purpose", "requirements"];
+  schema.properties.functions.items.required = ["name", "parameters", "purpose", "requirements", "behaviorReview", "behaviorEvidence"];
   schema.description = "Complete Design or Revision Mode project decisions. Approved Functions declare signatures plus user-approved purpose and behavioral requirements, never bodies. Requirements state relevant missing-value, duplicate, coding, cohort, and output rules. Targets call those functions, while Source File Targets use source.constant and omit function/output.";
   llamaCompatibleSchema(schema);
   return schema;
@@ -221,7 +237,7 @@ type NoticeLevel = "info" | "warning" | "error";
 type Phase = "design" | "revision" | "implementation";
 
 interface WorkbenchState {
-  version: 3;
+  version: 4;
   runtimeVersion: typeof PI_R_RUNTIME_VERSION;
   phase: Phase;
   projectRoot: string;
@@ -232,6 +248,7 @@ interface WorkbenchState {
   policyState: "pi-r-policy-v1";
   editableScopeCount: number;
   behaviorBlockedCount: number;
+  topologyChanged: boolean;
   pendingApproval: "none" | "contract-lock" | "environment-change" | "deliverable-publish";
   workerState: WorkerState;
   readOnlyRoots: string[];
@@ -316,7 +333,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
   if (!value || typeof value !== "object") return false;
   const state = value as Partial<WorkbenchState>;
   return (
-    state.version === 3 &&
+    state.version === 4 &&
     state.runtimeVersion === PI_R_RUNTIME_VERSION &&
     (state.phase === "design" || state.phase === "revision" || state.phase === "implementation") &&
     typeof state.projectRoot === "string" &&
@@ -328,6 +345,7 @@ function isWorkbenchState(value: unknown): value is WorkbenchState {
     state.policyState === "pi-r-policy-v1" &&
     typeof state.editableScopeCount === "number" &&
     typeof state.behaviorBlockedCount === "number" &&
+    typeof state.topologyChanged === "boolean" &&
     (state.pendingApproval === "none" || state.pendingApproval === "contract-lock" || state.pendingApproval === "environment-change" || state.pendingApproval === "deliverable-publish") &&
     (state.workerState === "stopped" || state.workerState === "running" || state.workerState === "crashed") &&
     Array.isArray(state.readOnlyRoots) &&
@@ -358,6 +376,7 @@ function hud(state: WorkbenchState): string {
     `duty=${duty}`,
     `contract=${state.contractState}`,
     `topology=${state.phase === "implementation" ? "locked" : "editable"}`,
+    `topology-changed=${state.topologyChanged}`,
     `scopes=${state.editableScopeCount}`,
     `behavior-blocked=${state.behaviorBlockedCount}`,
     `approval=${state.behaviorBlockedCount > 0 && state.phase === "implementation" ? "revision-required" : state.pendingApproval}`,
@@ -387,10 +406,29 @@ function resultMessage(result: ExecResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 }
 
+function resolvedBehaviorReviewStatement(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    !/^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(value.trim());
+}
+
+function topologyProjection(contract: Record<string, any>): string {
+  return JSON.stringify({
+    constants: contract.constants ?? {},
+    functions: Array.isArray(contract.functions)
+      ? contract.functions.map((fn: Record<string, unknown>) => ({ name: fn.name, parameters: fn.parameters }))
+      : [],
+    targets: contract.targets ?? [],
+    deliverables: contract.deliverables ?? [],
+  });
+}
+
 function contractSummary(contract: ProjectContract): string {
   const functions = contract.functions.map((fn) => [
     `- ${fn.name}(${fn.parameters.join(", ")}): ${fn.purpose ?? "legacy behavior unspecified"}`,
-    ...(fn.requirements ?? []).map((requirement) => `  - ${requirement}`),
+    ...(fn.requirements ?? []).map((requirement) => `  - requirement: ${requirement}`),
+    ...BEHAVIOR_REVIEW_CATEGORIES.map((category) => `  - review.${category}: ${fn.behaviorReview?.[category] ?? "UNRESOLVED"}`),
+    ...(fn.behaviorEvidence ?? []).map((evidence) => `  - evidence.${evidence.kind}: ${evidence.reference}`),
   ].join("\n")).join("\n");
   const constants = Object.entries(contract.constants)
     .map(([name, value]) => `- ${name} = ${JSON.stringify(value)}`)
@@ -561,13 +599,22 @@ export default function piRExtension(pi: ExtensionAPI): void {
       agentDuty,
       contract: {
         state: state.contractState,
-        topologyChanges: state.phase !== "implementation",
         proposalToolAvailable: state.phase !== "implementation",
+      },
+      topology: {
+        authority: state.phase === "implementation" ? "locked" : "editable",
+        changed: state.topologyChanged,
+      },
+      behavior: {
+        state: state.behaviorBlockedCount > 0 ? "incomplete" : "complete",
+        blockedFunctions: state.behaviorBlockedCount,
+        nextAction: state.behaviorBlockedCount === 0
+          ? (state.phase === "implementation" ? "inspect-and-edit" : "user-lock-review")
+          : (state.phase === "implementation" ? "user-revise" : "collect-and-propose"),
       },
       authority: {
         editableFunctionCount: state.editableScopeCount,
         behaviorBlockedFunctionCount: state.behaviorBlockedCount,
-        behaviorRevisionRequired: state.phase === "implementation" && state.behaviorBlockedCount > 0,
         generalMutation: false,
       },
       transition: state.phase === "implementation"
@@ -626,6 +673,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       return [
         ...safeReadTools(),
         "r_contract_propose",
+        DRAFT_INSPECT_TOOL,
         ...(phase === "revision" ? [BEHAVIOR_PROPOSAL_TOOL] : []),
         ...workerTools,
         ...dataTools,
@@ -1044,7 +1092,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
               artifact: target.artifact,
               purpose: fn.purpose ?? null,
               requirements: fn.requirements ?? [],
-              behaviorSpecified: typeof fn.purpose === "string" && (fn.requirements?.length ?? 0) > 0,
+              behaviorReview: fn.behaviorReview ?? null,
+              behaviorEvidence: fn.behaviorEvidence ?? [],
+              behaviorSpecified: !unspecifiedBehaviorFunctions(contract).includes(fn.name),
             }];
           });
           const verification = {
@@ -1340,16 +1390,104 @@ export default function piRExtension(pi: ExtensionAPI): void {
           const temporary = `${draft}.tmp`;
           await writeFile(temporary, `${JSON.stringify(contract, null, 2)}\n`, "utf8");
           await rename(temporary, draft);
-          state = { ...state, contractState: "draft", behaviorBlockedCount: unspecifiedBehaviorFunctions(contract).length };
+          const topologyChanged = state.phase === "design"
+            ? true
+            : topologyProjection(contract as unknown as Record<string, any>) !== topologyProjection(
+                JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")) as Record<string, any>,
+              );
+          state = {
+            ...state,
+            contractState: "draft",
+            behaviorBlockedCount: unspecifiedBehaviorFunctions(contract).length,
+            topologyChanged,
+          };
           pi.appendEntry(STATE_ENTRY, state);
           showHud(context, state);
+          const result = {
+            status: "draft-accepted",
+            functionCount: contract.functions.length,
+            behaviorBlockedFunctionCount: unspecifiedBehaviorFunctions(contract).length,
+            topologyChanged,
+            nextAction: { actor: "model", action: "Inspect the paginated draft before summarizing or requesting user lock review" },
+          };
           return {
-            content: [{ type: "text", text: `Draft accepted.\n\n${contractSummary(contract)}` }],
-            details: { draft, summary: contractSummary(contract) },
+            content: [{ type: "text", text: boundedJson(result) }],
+            details: { ...result, draft, summary: contractSummary(contract) },
           };
         });
         proposalQueue = operation.then(() => undefined, () => undefined);
         return operation;
+      },
+    });
+    pi.registerTool({
+      name: DRAFT_INSPECT_TOOL,
+      label: "Inspect Project Contract draft",
+      description: "Read a compact paginated projection of the current Design or Revision draft, including stable unresolved behavior decision IDs and whether topology actually differs from the committed contract.",
+      promptSnippet: "Inspect the draft before summarizing it. Ask only the returned unresolved decision IDs, with observed candidates when available; do not reconstruct draft state from memory.",
+      parameters: DRAFT_INSPECT_SCHEMA,
+      async execute(_toolCallId, params) {
+        if (!state || (state.phase !== "design" && state.phase !== "revision")) {
+          throw new RecoverableError("INVALID_PHASE", "Draft inspection requires active Design or Contract Revision Mode");
+        }
+        const input = params as { functionOffset: number; functionLimit: number };
+        const draftPath = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
+        const raw = await readFile(draftPath, "utf8").then((text) => JSON.parse(text) as Record<string, any>).catch(() => undefined);
+        if (!raw) {
+          const result = { status: "no-draft", nextAction: { actor: "model", action: "Propose the complete project contract" } };
+          return { content: [{ type: "text", text: boundedJson(result) }], details: result };
+        }
+        const functions = Array.isArray(raw.functions) ? raw.functions as Array<Record<string, any>> : [];
+        let topologyChanged = state.phase === "design";
+        if (state.phase === "revision") {
+          const locked = JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")) as Record<string, any>;
+          topologyChanged = topologyProjection(raw) !== topologyProjection(locked);
+        }
+        const page = functions.slice(input.functionOffset, input.functionOffset + input.functionLimit).map((fn) => {
+          const missingCategories = BEHAVIOR_REVIEW_CATEGORIES.filter((category) =>
+            !fn.behaviorReview || !resolvedBehaviorReviewStatement(fn.behaviorReview[category]),
+          );
+          const missing = [
+            ...(typeof fn.purpose === "string" && fn.purpose.length > 0 ? [] : [`${fn.name}:purpose`]),
+            ...(Array.isArray(fn.requirements) && fn.requirements.length > 0 ? [] : [`${fn.name}:requirements`]),
+            ...missingCategories.map((category) => `${fn.name}:${category}`),
+            ...(Array.isArray(fn.behaviorEvidence) && fn.behaviorEvidence.length > 0 ? [] : [`${fn.name}:evidence`]),
+          ];
+          return {
+            name: fn.name,
+            parameters: fn.parameters,
+            purpose: fn.purpose ?? null,
+            requirementCount: Array.isArray(fn.requirements) ? fn.requirements.length : 0,
+            reviewedCategories: BEHAVIOR_REVIEW_CATEGORIES.filter((category) => !missingCategories.includes(category)),
+            unresolvedDecisionIds: missing,
+            evidence: fn.behaviorEvidence ?? [],
+          };
+        });
+        const allUnresolved = functions.flatMap((fn) => [
+          ...(typeof fn.purpose === "string" && fn.purpose.length > 0 ? [] : [`${fn.name}:purpose`]),
+          ...(Array.isArray(fn.requirements) && fn.requirements.length > 0 ? [] : [`${fn.name}:requirements`]),
+          ...BEHAVIOR_REVIEW_CATEGORIES.filter((category) =>
+            !fn.behaviorReview || !resolvedBehaviorReviewStatement(fn.behaviorReview[category]),
+          ).map((category) => `${fn.name}:${category}`),
+          ...(Array.isArray(fn.behaviorEvidence) && fn.behaviorEvidence.length > 0 ? [] : [`${fn.name}:evidence`]),
+        ]);
+        const result = {
+          status: allUnresolved.length > 0 ? "questions-required" : "ready-for-user-lock-review",
+          topology: { authority: "editable", changed: topologyChanged },
+          functionCount: functions.length,
+          functions: page,
+          functionPage: {
+            offset: input.functionOffset,
+            returned: page.length,
+            nextOffset: input.functionOffset + page.length < functions.length ? input.functionOffset + page.length : null,
+          },
+          unresolvedDecisionCount: allUnresolved.length,
+          unresolvedDecisionIds: allUnresolved.slice(0, 50),
+          unresolvedDecisionIdsTruncated: allUnresolved.length > 50,
+          nextAction: allUnresolved.length > 0
+            ? { actor: "model", action: "Ask concise self-contained questions for these IDs; bounded structural inspection may identify observed candidates but cannot establish semantics" }
+            : { actor: "user", command: "/r lock", action: "Review and approve behavior and evidence" },
+        };
+        return { content: [{ type: "text", text: boundedJson(result) }], details: result };
       },
     });
     pi.registerTool({
@@ -1363,7 +1501,15 @@ export default function piRExtension(pi: ExtensionAPI): void {
           if (!state || state.phase !== "revision") {
             throw new RecoverableError("INVALID_PHASE", "Behavior-only proposals require active Contract Revision Mode");
           }
-          const input = params as { functions?: Array<{ name?: unknown; purpose?: unknown; requirements?: unknown; basis?: unknown }> };
+          const input = params as {
+            functions?: Array<{
+              name?: unknown;
+              purpose?: unknown;
+              requirements?: unknown;
+              behaviorReview?: unknown;
+              behaviorEvidence?: unknown;
+            }>;
+          };
           const updates = input.functions ?? [];
           const names = updates.map((entry) => entry.name);
           if (new Set(names).size !== names.length) {
@@ -1397,20 +1543,59 @@ export default function piRExtension(pi: ExtensionAPI): void {
             ) {
               throw new RecoverableError("INVALID_REQUEST", `Behavior requirements for '${String(update.name)}' must contain 1–10 bounded statements`);
             }
-            if (typeof update.basis !== "string" || update.basis.length < 1 || update.basis.length > 300) {
-              throw new RecoverableError("INVALID_REQUEST", `Behavior basis for '${String(update.name)}' must identify a user decision or authoritative source`);
+            if (!update.behaviorReview || typeof update.behaviorReview !== "object" || Array.isArray(update.behaviorReview)) {
+              throw new RecoverableError("INVALID_REQUEST", `Behavior review for '${String(update.name)}' must cover every category`);
+            }
+            const review = update.behaviorReview as Record<string, unknown>;
+            if (
+              Object.keys(review).length !== BEHAVIOR_REVIEW_CATEGORIES.length ||
+              BEHAVIOR_REVIEW_CATEGORIES.some((category) =>
+                typeof review[category] !== "string" ||
+                (review[category] as string).length < 1 ||
+                (review[category] as string).length > 300 ||
+                /^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test((review[category] as string).trim()),
+              )
+            ) {
+              throw new RecoverableError("INVALID_REQUEST", `Behavior review for '${String(update.name)}' must give a bounded rule or not-applicable rationale for every category`);
+            }
+            if (
+              !Array.isArray(update.behaviorEvidence) ||
+              update.behaviorEvidence.length < 1 ||
+              update.behaviorEvidence.length > 10 ||
+              update.behaviorEvidence.some((entry) => {
+                if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+                const evidence = entry as Record<string, unknown>;
+                return !["user-decision", "authoritative-source", "project-policy"].includes(String(evidence.kind)) ||
+                  typeof evidence.reference !== "string" || evidence.reference.length < 1 || evidence.reference.length > 300;
+              })
+            ) {
+              throw new RecoverableError("INVALID_REQUEST", `Behavior evidence for '${String(update.name)}' must identify 1–10 user decisions, authoritative sources, or project policies`);
             }
           }
           const byName = new Map(updates.map((entry) => [entry.name, entry]));
           proposal.functions = proposal.functions.map((fn: Record<string, unknown>) => {
             const update = byName.get(fn.name);
             return update
-              ? { ...fn, purpose: update.purpose, requirements: update.requirements }
+              ? {
+                  ...fn,
+                  purpose: update.purpose,
+                  requirements: update.requirements,
+                  behaviorReview: update.behaviorReview,
+                  behaviorEvidence: update.behaviorEvidence,
+                }
               : fn;
           });
           const unresolved = proposal.functions
             .filter((fn: Record<string, unknown>) =>
-              typeof fn.purpose !== "string" || fn.purpose.length === 0 || !Array.isArray(fn.requirements) || fn.requirements.length === 0,
+              typeof fn.purpose !== "string" ||
+              fn.purpose.length === 0 ||
+              !Array.isArray(fn.requirements) ||
+              fn.requirements.length === 0 ||
+              !fn.behaviorReview ||
+              typeof fn.behaviorReview !== "object" ||
+              BEHAVIOR_REVIEW_CATEGORIES.some((category) => typeof (fn.behaviorReview as Record<string, unknown>)[category] !== "string") ||
+              !Array.isArray(fn.behaviorEvidence) ||
+              fn.behaviorEvidence.length === 0,
             )
             .map((fn: Record<string, unknown>) => String(fn.name));
           let draftValue: unknown = proposal;
@@ -1428,7 +1613,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
           showHud(context, state);
           const summary = {
             status: unresolved.length === 0 ? "ready-for-user-lock-review" : "behavior-incomplete",
-            updatedFunctions: updates.map((entry) => ({ name: entry.name, basis: entry.basis })),
+            updatedFunctions: updates.map((entry) => ({
+              name: entry.name,
+              evidence: entry.behaviorEvidence,
+            })),
             unresolvedFunctionCount: unresolved.length,
             unresolvedFunctions: unresolved.slice(0, 20),
             unresolvedFunctionsTruncated: unresolved.length > 20,
@@ -1881,7 +2069,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       registerProposalTool();
     }
     const next: WorkbenchState = {
-      version: 3,
+      version: 4,
       runtimeVersion: PI_R_RUNTIME_VERSION,
       phase,
       projectRoot,
@@ -1892,6 +2080,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       policyState: "pi-r-policy-v1",
       editableScopeCount,
       behaviorBlockedCount,
+      topologyChanged: false,
       pendingApproval: "none",
       workerState: "stopped",
       readOnlyRoots: uniqueRoots,
@@ -2129,6 +2318,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       contractState: "locked",
       editableScopeCount: contract.functions.length,
       behaviorBlockedCount: 0,
+      topologyChanged: false,
       pendingApproval: "none",
       allowedTools: phaseTools("implementation"),
     };
@@ -2172,6 +2362,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       contractState: "draft",
       editableScopeCount: 0,
       behaviorBlockedCount: unspecifiedBehaviorFunctions(contract).length,
+      topologyChanged: false,
       workerState: "stopped",
       allowedTools: phaseTools("revision"),
     };
@@ -2200,6 +2391,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       contractState: "locked",
       editableScopeCount: contract.functions.length - unspecifiedBehaviorFunctions(contract).length,
       behaviorBlockedCount: unspecifiedBehaviorFunctions(contract).length,
+      topologyChanged: false,
       workerState: "stopped",
       allowedTools: phaseTools("implementation"),
     };
@@ -2260,7 +2452,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
           prior &&
           JSON.stringify(prior.parameters) === JSON.stringify(fn.parameters) &&
           prior.purpose === fn.purpose &&
-          JSON.stringify(prior.requirements) === JSON.stringify(fn.requirements)
+          JSON.stringify(prior.requirements) === JSON.stringify(fn.requirements) &&
+          JSON.stringify(prior.behaviorReview) === JSON.stringify(fn.behaviorReview) &&
+          JSON.stringify(prior.behaviorEvidence) === JSON.stringify(fn.behaviorEvidence)
         ) {
           const path = `R/${fn.name}.R`;
           files.set(path, await readFile(resolve(state.projectRoot, path), "utf8"));
@@ -2337,6 +2531,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           ...restored,
           editableScopeCount: contract.functions.length - behaviorBlockedCount,
           behaviorBlockedCount,
+          topologyChanged: false,
         };
       }
       updateLiveWorker([], false, "session-resumed");
@@ -2372,6 +2567,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       return { block: true, reason: `pi-r ${state.phase} mode blocks this tool` };
     }
     if (event.toolName === "r_contract_propose" && (state.phase === "design" || state.phase === "revision")) return undefined;
+    if (event.toolName === DRAFT_INSPECT_TOOL && (state.phase === "design" || state.phase === "revision")) return undefined;
     if (event.toolName === BEHAVIOR_PROPOSAL_TOOL && state.phase === "revision") return undefined;
     if ((WORKER_TOOLS as readonly string[]).includes(event.toolName)) return undefined;
     if (event.toolName === DATA_TOOL) return undefined;
@@ -2450,7 +2646,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
       : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
     const exploration = " Use r_data_inspect for paginated schema, selected-column summaries (selected[].top contains bounded value/count entries and topComplete says whether all values are present), key cardinality, and overlap before targets exist. In evaluate_r, targets means existing pipeline artifacts to load and retain means successful assignment names to preserve; return a named structured value, vector, table, or matrix as the final expression instead of using cat, print, cbind solely for display, or hand-formatted text. Use transactional evaluate_r with explicit targets and retain arrays; retain only objects needed later, inspect them with r_object_inspect, and use r_worker_clear for temporary-only cleanup. Failed evaluations roll back. Treat types, missingness, cardinality, and overlap as observations; never infer domain meaning, coding semantics, or a duplicate-resolution rule without contract, source-documentation, or user evidence. On worker failure, inspect r_worker_status diagnostics and use r_worker_reset for a verified restart.";
     const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
-    const routing = " Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. A request to implement code does not approve duplicate policy, coding dictionaries, qualifier handling, event definitions, cohort rules, joins, censoring, or output invariants. Only locked requirements grant that authority. If behaviorBlockedFunctionCount is positive, do not inspect raw data, draft bodies, or call edit: request user-only /r revise once and wait. In Revision Mode ask focused questions until every relevant behavioral decision has user or authoritative-source evidence, then record it in the draft; confidence alone is not evidence. Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. For implementation, inspect and edit exactly one function at a time; never issue parallel edits or repeat bodies, hashes, or payloads in prose. Keep progress text to at most two concise sentences.";
+    const behaviorRouting = state.phase === "implementation"
+      ? " If behaviorBlockedFunctionCount is positive, do not inspect data or draft bodies: request user-only /r revise once and wait."
+      : " Inspect the current draft with r_contract_draft_inspect before summarizing it. If behavior is incomplete, ask concise self-contained questions for the returned stable decision IDs. Bounded r_data_inspect may identify observed candidates that sharpen a question, but observations never establish semantics. Use explicit user decisions from this session or identified authoritative sources as evidence; do not re-ask an already precise user decision. Record every category rule or not-applicable rationale and its evidence before asking for /r lock.";
+    const routing = ` Before planning, classify the request: exploration; existing Approved Function body; existing target execution/diagnosis; dependency-only environment change; contract-topology change; publication; or deactivation. A request to implement code does not approve duplicate policy, coding dictionaries, qualifier handling, event definitions, cohort rules, joins, censoring, or output invariants. Only locked requirements grant that authority.${behaviorRouting} Dependency-only changes use r_dependency_propose and user-only /r environment without changing mode. For implementation, inspect and edit exactly one function at a time; never issue parallel edits or repeat bodies, hashes, or payloads in prose. For behavior review, output one state sentence, numbered decision questions, and one next-step sentence; do not narrate internal routing or reconstruct state from memory. Keep progress text to at most two concise sentences.`;
     return {
       systemPrompt: `${event.systemPrompt}\n\npi-r ${state.phase} mode is active (runtime ${PI_R_RUNTIME_VERSION}). Use only the active compact tools within: ${roots}. Current trusted pi-r guidance: ${currentGuidance}. Do not use remembered Nix-store guidance paths from another runtime. Do not request shell or general mutation tools.${currentStateRule}${routing}${proposal}${exploration}`,
     };

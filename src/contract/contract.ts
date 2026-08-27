@@ -5,7 +5,9 @@ import { RecoverableError } from "../r-edit/errors.js";
 import { fileTargetOutputs, validateDeliverablePath, validateSourcePath } from "./deliverables.js";
 import {
   ARTIFACT_KINDS,
+  BEHAVIOR_REVIEW_CATEGORIES,
   PATTERN_KINDS,
+  type BehaviorEvidence,
   type ArgumentReference,
   type ConstantValue,
   type ContractSummary,
@@ -280,6 +282,12 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
       if (!Array.isArray(candidate.requirements) || candidate.requirements.length === 0) {
         issues.push(`functions[${index}].requirements: new proposals must state at least one user-approved behavioral requirement`);
       }
+      if (!candidate.behaviorReview || typeof candidate.behaviorReview !== "object" || Array.isArray(candidate.behaviorReview)) {
+        issues.push(`functions[${index}].behaviorReview: new proposals must review every behavioral category`);
+      }
+      if (!Array.isArray(candidate.behaviorEvidence) || candidate.behaviorEvidence.length === 0) {
+        issues.push(`functions[${index}].behaviorEvidence: new proposals must identify user, source, or policy evidence`);
+      }
     });
   }
   if (issues.length > 0) {
@@ -298,7 +306,16 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
 
 export function unspecifiedBehaviorFunctions(contract: ProjectContract): string[] {
   return contract.functions
-    .filter((fn) => typeof fn.purpose !== "string" || fn.purpose.length === 0 || !Array.isArray(fn.requirements) || fn.requirements.length === 0)
+    .filter((fn) =>
+      typeof fn.purpose !== "string" ||
+      fn.purpose.length === 0 ||
+      !Array.isArray(fn.requirements) ||
+      fn.requirements.length === 0 ||
+      !fn.behaviorReview ||
+      BEHAVIOR_REVIEW_CATEGORIES.some((category) => !fn.behaviorReview?.[category]) ||
+      !Array.isArray(fn.behaviorEvidence) ||
+      fn.behaviorEvidence.length === 0,
+    )
     .map((fn) => fn.name);
 }
 
@@ -377,10 +394,11 @@ export function validateContract(input: unknown): ProjectContract {
   );
   const functionsInput = root.functions;
   if (!Array.isArray(functionsInput)) invalid("functions must be an array");
+  if (functionsInput.length > 200) invalid("functions must contain at most 200 entries");
   const functions = functionsInput.map((entry, index) => {
     const fn = object(entry, `functions[${index}]`);
     const path = `functions[${index}]`;
-    exactKeys(fn, ["name", "parameters", "purpose", "requirements"], path);
+    exactKeys(fn, ["name", "parameters", "purpose", "requirements", "behaviorReview", "behaviorEvidence"], path);
     let requirements: string[] | undefined;
     if (fn.requirements !== undefined) {
       requirements = stringArray(fn.requirements, `${path}.requirements`).map((requirement, requirementIndex) =>
@@ -390,11 +408,44 @@ export function validateContract(input: unknown): ProjectContract {
         invalid(`${path}.requirements must contain between 1 and 10 entries`);
       }
     }
+    let behaviorReview: Record<(typeof BEHAVIOR_REVIEW_CATEGORIES)[number], string> | undefined;
+    if (fn.behaviorReview !== undefined) {
+      const review = object(fn.behaviorReview, `${path}.behaviorReview`);
+      exactKeys(review, [...BEHAVIOR_REVIEW_CATEGORIES], `${path}.behaviorReview`);
+      behaviorReview = Object.fromEntries(BEHAVIOR_REVIEW_CATEGORIES.map((category) => {
+        const statement = boundedString(review[category], `${path}.behaviorReview.${category}`, 300);
+        if (/^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(statement.trim())) {
+          invalid(`${path}.behaviorReview.${category} must state the rule or why it is not applicable, not an unresolved placeholder`);
+        }
+        return [category, statement];
+      })) as Record<(typeof BEHAVIOR_REVIEW_CATEGORIES)[number], string>;
+    }
+    let behaviorEvidence: BehaviorEvidence[] | undefined;
+    if (fn.behaviorEvidence !== undefined) {
+      if (!Array.isArray(fn.behaviorEvidence) || fn.behaviorEvidence.length < 1 || fn.behaviorEvidence.length > 10) {
+        invalid(`${path}.behaviorEvidence must contain between 1 and 10 entries`);
+      }
+      behaviorEvidence = fn.behaviorEvidence.map((entry, evidenceIndex) => {
+        const evidencePath = `${path}.behaviorEvidence[${evidenceIndex}]`;
+        const evidence = object(entry, evidencePath);
+        exactKeys(evidence, ["kind", "reference"], evidencePath);
+        const kind = string(evidence.kind, `${evidencePath}.kind`);
+        if (!(["user-decision", "authoritative-source", "project-policy"] as const).includes(kind as any)) {
+          invalid(`${evidencePath}.kind is not supported`);
+        }
+        return {
+          kind: kind as BehaviorEvidence["kind"],
+          reference: boundedString(evidence.reference, `${evidencePath}.reference`, 300),
+        };
+      });
+    }
     return {
       name: rName(fn.name, `${path}.name`),
       parameters: stringArray(fn.parameters, `${path}.parameters`, true),
       ...(fn.purpose !== undefined ? { purpose: boundedString(fn.purpose, `${path}.purpose`, 500) } : {}),
       ...(requirements ? { requirements } : {}),
+      ...(behaviorReview ? { behaviorReview } : {}),
+      ...(behaviorEvidence ? { behaviorEvidence } : {}),
     };
   });
   if (new Set(functions.map((fn) => fn.name)).size !== functions.length) invalid("function names must be unique");

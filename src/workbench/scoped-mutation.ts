@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { validateContract } from "../contract/contract.js";
+import { unspecifiedBehaviorFunctions, validateContract } from "../contract/contract.js";
+import type { ApprovedFunction } from "../contract/types.js";
 import { RecoverableError } from "../r-edit/errors.js";
 import { createEditCandidate } from "../r-edit/scoped-edit.js";
 import { withTemporaryRFile } from "../r-edit/tooling.js";
@@ -32,6 +33,8 @@ export interface ApprovedFunctionInspection {
     specified: boolean;
     purpose: string | null;
     requirements: string[];
+    review: ApprovedFunction["behaviorReview"] | null;
+    evidence: ApprovedFunction["behaviorEvidence"];
     agentAction: string;
   };
 }
@@ -180,7 +183,7 @@ export async function inspectApprovedFunctions(
     }
     const path = `R/${approved.name}.R`;
     const source = await readFile(resolve(root, path), "utf8");
-    const specified = typeof approved.purpose === "string" && (approved.requirements?.length ?? 0) > 0;
+    const specified = !unspecifiedBehaviorFunctions(contract).includes(approved.name);
     return {
       contractHash,
       contractVersion: contract.contractVersion,
@@ -194,6 +197,8 @@ export async function inspectApprovedFunctions(
         specified,
         purpose: approved.purpose ?? null,
         requirements: approved.requirements ?? [],
+        review: approved.behaviorReview ?? null,
+        evidence: approved.behaviorEvidence ?? [],
         agentAction: specified
           ? "Implement only the locked purpose and requirements"
           : "Legacy behavior is unspecified; ask the user for requirements before inventing domain rules",
