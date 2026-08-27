@@ -1,7 +1,13 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export { readContract, summarizeContract, validateContract } from "./contract/contract.js";
+export {
+  readContract,
+  summarizeContract,
+  unspecifiedBehaviorFunctions,
+  validateContract,
+  validateLockableContract,
+} from "./contract/contract.js";
 export { checkScaffold, generateScaffold, renderScaffold } from "./contract/scaffold.js";
 export type { ProjectContract, ContractSummary, VersionedDeliverable } from "./contract/types.js";
 export { classifyPackage, policyForDomain, resolveContractPackages, resolvePackages, technologyPolicyVersion } from "./environment/package-governance.js";
@@ -14,7 +20,7 @@ export { assertBaseRParse } from "./r-edit/tooling.js";
 export { validateContractEnvironment } from "./workbench/environment-governance.js";
 export type { EditCandidate, EditRequest, Inspection, RFunction } from "./r-edit/types.js";
 
-export const VERSION = "0.20.0";
+export const VERSION = "0.21.0";
 
 export interface ResourcePaths {
   resources: string;

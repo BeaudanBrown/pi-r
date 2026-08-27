@@ -216,7 +216,11 @@ export async function prepareScopedMutation(projectRoot: string, input: unknown)
     throw new RecoverableError(
       "BEHAVIOR_UNSPECIFIED",
       `Approved Function '${inspection.function}' belongs to a legacy contract without locked behavioral requirements`,
-      { agentAction: "Do not invent domain rules; ask the user to enter /r revise and approve purpose and requirements" },
+      { remainingParallelEditsWillFail: true },
+      {
+        retryable: false,
+        agentAction: "Stop implementation planning. Do not inspect data or summarize inferred requirements; ask the user to enter /r revise and approve purpose and requirements",
+      },
     );
   }
   const path = resolve(projectRoot, inspection.path);

@@ -296,6 +296,24 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
   });
 }
 
+export function unspecifiedBehaviorFunctions(contract: ProjectContract): string[] {
+  return contract.functions
+    .filter((fn) => typeof fn.purpose !== "string" || fn.purpose.length === 0 || !Array.isArray(fn.requirements) || fn.requirements.length === 0)
+    .map((fn) => fn.name);
+}
+
+export function validateLockableContract(input: unknown): ProjectContract {
+  const contract = validateContract(input);
+  const unspecified = unspecifiedBehaviorFunctions(contract);
+  if (unspecified.length > 0) {
+    invalid(
+      `contract cannot be locked: ${unspecified.length} Approved Function${unspecified.length === 1 ? "" : "s"} lack purpose or behavioral requirements: ${unspecified.join(", ")}. Use the behavior proposal capability and resolve every missing decision before /r lock`,
+      { code: "BEHAVIOR_INCOMPLETE", functions: unspecified },
+    );
+  }
+  return contract;
+}
+
 export function validateContract(input: unknown): ProjectContract {
   const root = object(input, "contract");
   exactKeys(

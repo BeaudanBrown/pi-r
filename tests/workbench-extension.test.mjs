@@ -126,8 +126,8 @@ async function tableArtifactProject() {
   await execFileAsync(process.env.PI_R_WORKER_RSCRIPT, ["--vanilla", "-e", "targets::tar_make(reporter = 'silent', callr_function = NULL)"], { cwd: root, timeout: 30_000 });
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
-    version: 2,
-    runtimeVersion: "0.20.0",
+    version: 3,
+    runtimeVersion: "0.21.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -135,7 +135,8 @@ async function tableArtifactProject() {
     head,
     contractState: "locked",
     policyState: "pi-r-policy-v1",
-    editableScopeCount: 2,
+    editableScopeCount: 1,
+    behaviorBlockedCount: 1,
     pendingApproval: "none",
     workerState: "stopped",
     readOnlyRoots: [],
@@ -288,8 +289,14 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     await h.handlers.get("tool_call")({ toolName: "read", input: { path: join(process.env.PI_R_RESOURCE_ROOT, "extensions/pi-r.ts") } }, ctx),
     { block: true, reason: "pi-r read path is outside approved read-only roots" },
   );
+  const rawCsv = join(root, "untracked.csv");
+  await writeFile(rawCsv, "id,value\n1,secret\n");
+  assert.deepEqual(
+    await h.handlers.get("tool_call")({ toolName: "read", input: { path: rawCsv } }, ctx),
+    { block: true, reason: "pi-r blocks direct raw-data reads; use r_data_inspect for bounded structural evidence" },
+  );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 approval=none worker=stopped runtime=0\.20\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.21\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -1442,15 +1449,23 @@ test("table artifact inspection returns structure and summaries without rows and
   assert.match(functionState.details.behavior.requirements[0], /two rows keyed by value/);
   const legacyState = await inspectFunction(functionTool, "inspect-legacy-maker", "make_object", ctx);
   assert.equal(legacyState.details.behavior.specified, false);
-  assert.match(legacyState.details.behavior.agentAction, /ask the user/i);
+  assert.equal(legacyState.details.behavior.requirementCount, 0);
+  assert.deepEqual(JSON.parse(legacyState.content[0].text).nextAction, {
+    actor: "user",
+    command: "/r revise",
+    action: "Approve purpose and requirements before implementation planning",
+  });
+  assert.equal(legacyState.details.sourceHash, undefined);
+  assert.equal(JSON.parse(legacyState.content[0].text).blockingReason, "BEHAVIOR_UNSPECIFIED");
   await assert.rejects(editTool.execute("reject-legacy-maker", {
     function: "make_object",
-    expectedSourceHash: legacyState.details.sourceHash,
+    expectedSourceHash: undefined,
     operation: { kind: "replace", body: "{\nlist(value = seed)\n}" },
-  }, undefined, undefined, ctx), /BEHAVIOR_UNSPECIFIED/);
+  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  const refreshedFunctionState = await inspectFunction(functionTool, "inspect-maker-again", "make_table", ctx);
   await editTool.execute("replace-maker", {
     function: "make_table",
-    expectedSourceHash: functionState.details.sourceHash,
+    expectedSourceHash: refreshedFunctionState.details.sourceHash,
     operation: { kind: "replace", body: "{\nlist(value = c(seed, seed + 1L))\n}" },
   }, undefined, undefined, ctx);
   await h.tools.find((tool) => tool.name === "r_targets_run")
@@ -1469,6 +1484,41 @@ test("table artifact inspection returns structure and summaries without rows and
   const listed = await h.tools.find((tool) => tool.name === "r_targets_list")
     .execute("list-mismatched-table", {}, undefined, undefined, ctx);
   assert.equal(listed.details.targets.find((target) => target.name === "sample_table").freshness, "current");
+});
+
+test("legacy behavior requires a behavior-only revision before relocking", { timeout: 180_000 }, async (t) => {
+  const { root, entries } = await tableArtifactProject();
+  const h = harness(entries);
+  const ctx = context(root, entries, [true, true]);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
+  await h.handlers.get("session_start")({ reason: "resume" }, ctx);
+  assert.equal(h.appended.length, 0);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=1 behavior-blocked=1 approval=revision-required/);
+
+  await h.commands[0].options.handler("revise", ctx);
+  assert.ok(h.activeToolChanges.at(-1).includes("r_function_behavior_propose"));
+  await h.commands[0].options.handler("lock", ctx);
+  assert.match(ctx.notifications.at(-1)[0], /lock failed:.*make_object.*purpose.*behavioral requirements|lock failed:.*purpose.*behavioral requirement/is);
+  assert.equal((await git(root, "branch", "--show-current")), "pi-r/workbench");
+
+  const behaviorTool = h.tools.find((tool) => tool.name === "r_function_behavior_propose");
+  const proposed = await behaviorTool.execute("migrate-behavior", {
+    functions: [{
+      name: "make_object",
+      purpose: "Return the approved bounded object",
+      requirements: ["Return a list containing value equal to seed and label equal to bounded"],
+      basis: "Explicit test operator decision",
+    }],
+  }, undefined, undefined, ctx);
+  assert.equal(proposed.details.status, "ready-for-user-lock-review");
+  assert.deepEqual(proposed.details.unresolvedFunctions, []);
+
+  await h.commands[0].options.handler("lock", ctx);
+  assert.equal(h.appended.at(-1).data.phase, "implementation");
+  assert.equal(h.appended.at(-1).data.behaviorBlockedCount, 0);
+  assert.equal(h.appended.at(-1).data.editableScopeCount, 2);
+  const locked = JSON.parse(await readFile(join(root, "pi-r.yml"), "utf8"));
+  assert.equal(locked.functions.find((fn) => fn.name === "make_object").purpose, "Return the approved bounded object");
 });
 
 test("implementation mode commits only validated Approved Function body edits", async () => {
@@ -1495,11 +1545,18 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.equal(batch.details.functions.every((entry) => entry.sourceOmitted && entry.behavior.requirementsOmitted), true);
   assert.doesNotMatch(batch.content[0].text, /Not implemented/);
   assert.doesNotThrow(() => JSON.parse(batch.content[0].text));
+  assert.equal(batch.details.functions.every((entry) => entry.sourceHash === undefined), true);
+  await assert.rejects(editTool.execute("edit-with-stale-inspection-grant", {
+    function: "load_input",
+    expectedSourceHash: inspected.details.sourceHash,
+    operation: { kind: "replace", body: "{\npath\n}" },
+  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  const immediateInspection = await inspectFunction(inspectTool, "inspect-immediate", "load_input", ctx);
   const headBefore = await git(root, "rev-parse", "HEAD");
 
   const result = await editTool.execute("edit-1", {
     function: "load_input",
-    expectedSourceHash: inspected.details.sourceHash,
+    expectedSourceHash: immediateInspection.details.sourceHash,
     operation: {
       kind: "replace",
       body: "{\n  identity_local <- function(value) value\n  lapply(list(path), function(item) identity_local(item))[[1]]\n}",
@@ -1549,7 +1606,8 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
   const editTool = h.tools.find((tool) => tool.name === "r_function_edit");
   const path = join(root, "R/load_input.R");
   const original = await readFile(path, "utf8");
-  const digest = (await inspectFunction(inspectTool, "inspect", "load_input", ctx)).details.sourceHash;
+  const inspectDigest = async (id) => (await inspectFunction(inspectTool, id, "load_input", ctx)).details.sourceHash;
+  const digest = await inspectDigest("inspect");
   const head = await git(root, "rev-parse", "HEAD");
   const forbiddenBodies = [
     ["library(pkg)", /POLICY_VIOLATION.*library/],
@@ -1563,10 +1621,11 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
     ["do.call(\"library\", list(\"pkg\"))", /POLICY_VIOLATION.*do\.call/],
     ["loader <- library\nloader(\"pkg\")", /POLICY_VIOLATION.*library/],
   ];
-  for (const [expression, expected] of forbiddenBodies) {
+  for (const [index, [expression, expected]] of forbiddenBodies.entries()) {
+    const currentDigest = await inspectDigest(`inspect-forbidden-${index}`);
     await assert.rejects(editTool.execute("forbidden", {
       function: "load_input",
-      expectedSourceHash: digest,
+      expectedSourceHash: currentDigest,
       operation: { kind: "replace", body: `{\n${expression}\n}` },
     }, undefined, undefined, ctx), expected);
   }
@@ -1574,23 +1633,25 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
     function: "load_input",
     expectedSourceHash: `sha256:${"0".repeat(64)}`,
     operation: { kind: "replace", body: "{\npath\n}" },
-  }, undefined, undefined, ctx), /STALE_CONTENT/);
+  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
   await assert.rejects(editTool.execute("scope", {
     function: "not_approved",
     expectedSourceHash: digest,
     operation: { kind: "replace", body: "{\nNULL\n}" },
-  }, undefined, undefined, ctx), /SCOPE_VIOLATION/);
+  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  const syntaxDigest = await inspectDigest("inspect-syntax");
   await assert.rejects(editTool.execute("syntax", {
     function: "load_input",
-    expectedSourceHash: digest,
+    expectedSourceHash: syntaxDigest,
     operation: { kind: "replace", body: "{\nif (\n}" },
   }, undefined, undefined, ctx), /INVALID_R_SYNTAX/);
   const formatter = process.env.PI_R_FORMATTER_SCRIPT;
   process.env.PI_R_FORMATTER_SCRIPT = join(root, "missing-formatter.R");
   try {
+    const formatterDigest = await inspectDigest("inspect-formatter");
     await assert.rejects(editTool.execute("formatter", {
       function: "load_input",
-      expectedSourceHash: digest,
+      expectedSourceHash: formatterDigest,
       operation: { kind: "replace", body: "{\npath\n}" },
     }, undefined, undefined, ctx), /FORMATTER_FAILURE/);
   } finally {
@@ -1623,7 +1684,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.20\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.21\.0.*fresh Pi session/i);
   assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
   const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);
