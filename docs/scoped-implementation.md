@@ -11,12 +11,14 @@ Neither tool accepts a path. Paths derive from the locked contract as `R/<functi
 
 New Design and Revision proposals give every Approved Function:
 
-- a domain `purpose`; and
-- bounded user-approved `requirements`, including relevant missing-value, duplicate, coding, cohort, and output rules.
+- a domain `purpose`;
+- bounded user-approved `requirements`;
+- a rule or not-applicable rationale for every behavior-review category; and
+- durable user-decision, authoritative-source, or project-policy evidence.
 
 Inspection places those requirements beside a single-function source page and digest. Compact inspection omits digests so it cannot authorize edits. A legacy function returns one `BEHAVIOR_UNSPECIFIED` blocker and cannot be edited. The agent must stop implementation planning and ask the user to enter `/r revise`; it must not inspect data, draft bodies, or turn names, observed values, remembered conversation, or a generic implementation request into behavioral approval.
 
-Changing purpose or requirements during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
+Changing purpose, requirements, review, or evidence during Contract Revision invalidates the prior implementation and restores its fail-closed stub even when name and parameters are unchanged.
 
 ## Validation and policy
 
