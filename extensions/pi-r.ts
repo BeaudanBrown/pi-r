@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -75,7 +75,7 @@ const DECISION_RECORD_SCHEMA = {
     question: { type: "string", minLength: 1, maxLength: 1000 },
     answerQuote: { type: "string", minLength: 1, maxLength: 1000, description: "Exact substring from a user message in the current session; broad paraphrases are rejected." },
     functions: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 100 } },
-    categories: { type: "array", minItems: 1, maxItems: 11, uniqueItems: true, items: { enum: [...BEHAVIOR_REVIEW_CATEGORIES] } },
+    categories: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: { enum: [...BEHAVIOR_REVIEW_CATEGORIES] } },
   },
 } as const;
 const DRAFT_INSPECT_SCHEMA = {
@@ -641,8 +641,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
   let previousCompletionTruncated = false;
   let quarantineReason: string | undefined;
   let lastEditInspection: { function: string; sourceHash: string } | undefined;
-  const userEvidenceMessages = new Map<string, string>();
-  const assistantEvidenceMessages = new Map<string, string>();
+  const evidenceSessionToken = randomUUID();
+  let conversationEvidence: Array<{ role: "user" | "assistant"; text: string; hash: string; index: number }> = [];
 
   function updateLiveWorker(objects: WorkerObject[], transientStateLost: boolean, transition?: string): void {
     const originOrder: Record<WorkerObject["origin"], number> = { temporary: 0, target: 1, global: 2 };
@@ -783,6 +783,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
       for (const evidence of fn.behaviorEvidence ?? []) {
         if (evidence.kind !== "user-decision") continue;
         const recorded = ledger.some((entry) =>
+          entry.sessionToken === evidenceSessionToken &&
           entry.decisionId === evidence.decisionId &&
           entry.messageHash === evidence.messageHash &&
           entry.question === evidence.question &&
@@ -1614,6 +1615,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             purpose: fn.purpose ?? null,
             requirements: fn.requirements ?? [],
             behaviorReview: fn.behaviorReview ?? null,
+            behaviorDecisions: fn.behaviorDecisions ?? null,
             evidence: fn.behaviorEvidence ?? [],
             missingBehaviorFields: missingFields,
           },
@@ -1643,22 +1645,33 @@ export default function piRExtension(pi: ExtensionAPI): void {
           functions: string[];
           categories: string[];
         };
-        const matchedQuestion = [...assistantEvidenceMessages.entries()].reverse().find(([, text]) => text.includes(input.question));
-        if (!matchedQuestion) {
+        if (!Array.isArray(input.categories) || input.categories.length < 1 || input.categories.length > 3) {
+          throw new RecoverableError("INVALID_REQUEST", "One recorded decision may cover between one and three closely related behavior categories");
+        }
+        if (/^(?:yes|sure|ok(?:ay)?|fine|looks (?:fine|good)|approved|otherwise seems fine|go ahead|do it)[.!\s]*$/i.test(input.answerQuote.trim())) {
           throw new RecoverableError(
-            "UNVERIFIED_DECISION_QUESTION",
-            "question is not an exact substring of any current-session assistant message",
+            "AMBIGUOUS_USER_DECISION",
+            "A broad approval phrase cannot become behavioral authority; the answer must state the observable decision",
             undefined,
-            { retryable: false, agentAction: "Ask the self-contained question explicitly before recording its answer" },
+            { retryable: false, agentAction: "Ask the user to state the specific behavior rather than answer with a general approval" },
           );
         }
-        const matched = [...userEvidenceMessages.entries()].reverse().find(([, text]) => text.includes(input.answerQuote));
-        if (!matched) {
+        const questionCandidates = conversationEvidence.filter((entry) => entry.role === "assistant" && entry.text.includes(input.question));
+        const exchange = [...questionCandidates].reverse().map((question) => {
+          const answer = conversationEvidence.find((entry) =>
+            entry.role === "user" &&
+            entry.index > question.index &&
+            entry.text.includes(input.answerQuote) &&
+            !conversationEvidence.some((between) => between.role === "assistant" && between.index > question.index && between.index < entry.index),
+          );
+          return answer ? { question, answer } : undefined;
+        }).find((value): value is { question: typeof conversationEvidence[number]; answer: typeof conversationEvidence[number] } => value !== undefined);
+        if (!exchange) {
           throw new RecoverableError(
             "UNVERIFIED_USER_DECISION",
-            "answerQuote is not an exact substring of any current-session user message",
+            "No ordered current-session assistant-question/user-answer exchange contains the exact question and answer quote",
             undefined,
-            { retryable: false, agentAction: "Ask a self-contained question and wait for an explicit user answer; do not paraphrase or infer approval" },
+            { retryable: false, agentAction: "Ask one self-contained question and wait for the user's specific answer before recording it" },
           );
         }
         const draftPath = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
@@ -1670,8 +1683,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
         } else if (state.phase !== "design") {
           throw new RecoverableError("INVALID_DRAFT", "Contract Revision has no draft for decision scope validation");
         }
-        const [questionHash] = matchedQuestion;
-        const [messageHash] = matched;
+        const questionHash = exchange.question.hash;
+        const messageHash = exchange.answer.hash;
         const evidence = {
           kind: "user-decision" as const,
           reference: `Recorded operator decision ${input.decisionId}`,
@@ -1681,8 +1694,16 @@ export default function piRExtension(pi: ExtensionAPI): void {
           answer: input.answerQuote,
           messageHash,
         };
-        const record = { ...evidence, functions: input.functions, categories: input.categories };
+        const record = { ...evidence, functions: input.functions, categories: input.categories, sessionToken: evidenceSessionToken };
         const ledgerPath = resolve(state.projectRoot, ".pi/tmp/pi-r-behavior-decisions.json");
+        await mkdir(dirname(ledgerPath), { recursive: true });
+        const excludeResult = await git(["rev-parse", "--git-path", "info/exclude"], state.projectRoot);
+        const excludePath = isAbsolute(excludeResult.stdout.trim()) ? excludeResult.stdout.trim() : resolve(state.projectRoot, excludeResult.stdout.trim());
+        const exclusion = await readFile(excludePath, "utf8").catch(() => "");
+        if (!exclusion.split("\n").includes(".pi/tmp/")) {
+          await mkdir(dirname(excludePath), { recursive: true });
+          await writeFile(excludePath, `${exclusion}${exclusion.endsWith("\n") || !exclusion ? "" : "\n"}.pi/tmp/\n`, "utf8");
+        }
         const ledger = await readFile(ledgerPath, "utf8").then((text) => JSON.parse(text) as Array<Record<string, unknown>>).catch(() => []);
         const existing = ledger.find((entry) => entry.decisionId === input.decisionId);
         if (existing && JSON.stringify(existing) !== JSON.stringify(record)) {
@@ -1795,6 +1816,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             for (const evidence of update.behaviorEvidence as Array<Record<string, unknown>>) {
               if (evidence.kind !== "user-decision") continue;
               const ledgerEntry = decisionLedger.find((entry) =>
+                entry.sessionToken === evidenceSessionToken &&
                 entry.decisionId === evidence.decisionId &&
                 entry.messageHash === evidence.messageHash &&
                 entry.question === evidence.question &&
@@ -1808,6 +1830,25 @@ export default function piRExtension(pi: ExtensionAPI): void {
                   `User-decision evidence for '${String(update.name)}' was not produced by r_behavior_decision_record`,
                   undefined,
                   { retryable: false, agentAction: "Record the exact user answer through the decision capability before proposing behavior" },
+                );
+              }
+            }
+            const evidenceEntries = update.behaviorEvidence as Array<Record<string, unknown>>;
+            if (evidenceEntries.every((evidence) => evidence.kind === "user-decision")) {
+              const covered = new Set(decisionLedger
+                .filter((entry) => entry.sessionToken === evidenceSessionToken && evidenceEntries.some((evidence) => evidence.decisionId === entry.decisionId))
+                .flatMap((entry) => Array.isArray(entry.categories) ? entry.categories : []));
+              const review = update.behaviorReview as Record<string, unknown>;
+              const applicable = BEHAVIOR_REVIEW_CATEGORIES.filter((category) =>
+                typeof review[category] === "string" && !/^not applicable\b/i.test((review[category] as string).trim()),
+              );
+              const uncovered = applicable.filter((category) => !covered.has(category));
+              if (uncovered.length > 0) {
+                throw new RecoverableError(
+                  "EVIDENCE_SCOPE_INCOMPLETE",
+                  `Recorded user decisions for '${String(update.name)}' do not cover applicable categories: ${uncovered.join(", ")}`,
+                  undefined,
+                  { retryable: false, agentAction: "Ask category-specific questions and record their exact answers; do not broaden an existing approval" },
                 );
               }
             }
@@ -2171,8 +2212,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
 
   async function start(rootArguments: string[], context: CommandContext): Promise<void> {
     if (state) throw new Error("pi-r Workbench Session is already active; use /r status or /r stop");
-    userEvidenceMessages.clear();
-    assistantEvidenceMessages.clear();
+    conversationEvidence = [];
     const startedAt = Date.now();
     showStartProgress(context, "checking repository");
     const workingDirectory = await realpath(context.cwd);
@@ -2765,7 +2805,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
       }
       registerWorkerTools();
       registerDataTool();
-      if (restored.phase === "design" || restored.phase === "revision") registerProposalTool();
+      if (restored.phase === "design" || restored.phase === "revision") {
+        const ledgerPath = resolve(restored.projectRoot, ".pi/tmp/pi-r-behavior-decisions.json");
+        await mkdir(dirname(ledgerPath), { recursive: true });
+        await writeFile(ledgerPath, "[]\n", "utf8");
+        registerProposalTool();
+      }
       if (restored.phase === "implementation") {
         registerEditTool();
         registerTargetTools();
@@ -2807,6 +2852,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     context.ui.setWidget?.("pi-r-hud", undefined);
     context.ui.setStatus?.("pi-r", undefined);
     state = undefined;
+    conversationEvidence = [];
     quarantineReason = undefined;
   });
 
@@ -2856,14 +2902,13 @@ export default function piRExtension(pi: ExtensionAPI): void {
 
   pi.on("context", async (event) => {
     if (!state) return undefined;
-    for (const message of Array.isArray(event.messages) ? event.messages : []) {
-      if (message && typeof message === "object") {
-        const role = (message as { role?: unknown }).role;
-        const text = messageText((message as { content?: unknown }).content);
-        if (text && role === "user") userEvidenceMessages.set(sha256Text(text), text);
-        if (text && role === "assistant") assistantEvidenceMessages.set(sha256Text(text), text);
-      }
-    }
+    conversationEvidence = (Array.isArray(event.messages) ? event.messages : []).flatMap((message: unknown, index: number) => {
+      if (!message || typeof message !== "object") return [];
+      const role = (message as { role?: unknown }).role;
+      if (role !== "user" && role !== "assistant") return [];
+      const text = messageText((message as { content?: unknown }).content);
+      return text ? [{ role, text, hash: sha256Text(text), index }] : [];
+    });
     const messages = (Array.isArray(event.messages) ? event.messages : []).filter(
       (message: unknown) => {
         if (!message || typeof message !== "object") return true;
@@ -2945,8 +2990,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
         worker = undefined;
         projectRscript = undefined;
         state = undefined;
-        userEvidenceMessages.clear();
-        assistantEvidenceMessages.clear();
+        conversationEvidence = [];
         updateLiveWorker([], false, "inactive");
         previousCompletionTruncated = false;
         pi.appendEntry(STATE_ENTRY, { inactive: true });

@@ -327,6 +327,26 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     await h.handlers.get("tool_call")({ toolName: "grep", input: { path: root, pattern: "secret" } }, ctx),
     { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" },
   );
+  await h.handlers.get("context")({ messages: [
+    { role: "assistant", content: "Should future_fn preserve all input rows?" },
+    { role: "user", content: "future_fn must preserve all input rows." },
+  ] }, ctx);
+  const initialDecision = await h.tools.find((tool) => tool.name === "r_behavior_decision_record").execute(
+    "record-before-first-proposal",
+    {
+      decisionId: "INITIAL-D1",
+      question: "Should future_fn preserve all input rows?",
+      answerQuote: "future_fn must preserve all input rows",
+      functions: ["future_fn"],
+      categories: ["cohort"],
+    },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(initialDecision.details.status, "recorded");
+  assert.equal(await git(root, "check-ignore", ".pi/tmp/pi-r-behavior-decisions.json"), ".pi/tmp/pi-r-behavior-decisions.json");
+  assert.equal(JSON.parse(await readFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "utf8")).length, 1);
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
   assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.23\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
@@ -1600,6 +1620,7 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
     ctx,
   );
   assert.ok(makeObjectDetail.details.function.missingBehaviorFields.includes("make_object:duplicates"));
+  assert.equal(makeObjectDetail.details.function.behaviorDecisions, null);
   assert.equal(makeObjectDetail.details.operatorDecisionState, "not-derived-from-schema-fields");
   await h.commands[0].options.handler("lock", ctx);
   assert.match(ctx.notifications.at(-1)[0], /lock failed:.*proposal has 5 semantic issues.*purpose.*requirements.*behaviorReview.*behaviorEvidence.*behaviorDecisions/is);
@@ -1635,10 +1656,40 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
     }],
   }, undefined, undefined, ctx), /UNVERIFIED_USER_DECISION/);
   await h.handlers.get("context")({ messages: [
+    { role: "assistant", content: "How should unrelated duplicates be handled?" },
+    { role: "user", content: "Keep the first duplicate." },
+    { role: "assistant", content: "Should every remaining behavior category use the proposed defaults?" },
+    { role: "user", content: "looks fine" },
     { role: "assistant", content: "What exact object must make_object return?" },
     { role: "user", content: "For TEST-D1, return value equal to seed and label equal to bounded." },
   ] }, ctx);
   const decisionTool = h.tools.find((tool) => tool.name === "r_behavior_decision_record");
+  await assert.rejects(decisionTool.execute(
+    "reject-broad-approval",
+    {
+      decisionId: "TEST-D-BROAD",
+      question: "Should every remaining behavior category use the proposed defaults?",
+      answerQuote: "looks fine",
+      functions: ["make_object"],
+      categories: ["missing-values", "output-schema"],
+    },
+    undefined,
+    undefined,
+    ctx,
+  ), /AMBIGUOUS_USER_DECISION/);
+  await assert.rejects(decisionTool.execute(
+    "reject-unrelated-prior-answer",
+    {
+      decisionId: "TEST-D-UNRELATED",
+      question: "What exact object must make_object return?",
+      answerQuote: "Keep the first duplicate",
+      functions: ["make_object"],
+      categories: ["output-schema"],
+    },
+    undefined,
+    undefined,
+    ctx,
+  ), /UNVERIFIED_USER_DECISION/);
   await assert.rejects(decisionTool.execute(
     "reject-paraphrased-decision",
     {
@@ -1672,7 +1723,7 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
       purpose: "Return the approved bounded object",
       requirements: ["Return a list containing value equal to seed and label equal to bounded"],
       behaviorReview: completeBehaviorReview,
-      behaviorEvidence: [recorded.details.evidence],
+      behaviorEvidence: [recorded.details.evidence, ...fixtureBehaviorEvidence],
       behaviorDecisions: fixtureBehaviorDecisions,
     }],
   }, undefined, undefined, ctx);
@@ -1687,7 +1738,7 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
   const migrated = locked.functions.find((fn) => fn.name === "make_object");
   assert.equal(migrated.purpose, "Return the approved bounded object");
   assert.equal(migrated.behaviorReview.duplicates, completeBehaviorReview.duplicates);
-  assert.deepEqual(migrated.behaviorEvidence, [recorded.details.evidence]);
+  assert.deepEqual(migrated.behaviorEvidence, [recorded.details.evidence, ...fixtureBehaviorEvidence]);
   assert.deepEqual(migrated.behaviorDecisions, fixtureBehaviorDecisions);
 });
 
@@ -1841,9 +1892,12 @@ test("persisted workbench state resumes only when project and branch still match
   const entries = structuredClone(first.appended);
   entries[0].data.allowedTools = ["bash"];
 
+  await mkdir(join(root, ".pi/tmp"), { recursive: true });
+  await writeFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "[{\"decisionId\":\"OLD\",\"sessionToken\":\"prior-session\"}]\n");
   const resumed = harness(entries);
   const resumedContext = context(root, entries);
   await resumed.handlers.get("session_start")({ reason: "resume" }, resumedContext);
+  assert.deepEqual(JSON.parse(await readFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "utf8")), []);
   assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_behavior_decision_record", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
   await resumed.commands[0].options.handler("status", resumedContext);
   assert.match(resumedContext.notifications.at(-1)[0], /mode=design .*branch=pi-r\/workbench@/);
