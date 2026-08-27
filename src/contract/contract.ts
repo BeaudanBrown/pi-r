@@ -433,9 +433,13 @@ export function validateContract(input: unknown): ProjectContract {
         if (!(["user-decision", "authoritative-source", "project-policy"] as const).includes(kind as any)) {
           invalid(`${evidencePath}.kind is not supported`);
         }
+        const reference = boundedString(evidence.reference, `${evidencePath}.reference`, 300).trim();
+        if (!reference || /^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(reference)) {
+          invalid(`${evidencePath}.reference must identify a concrete user decision, authoritative source, or project policy`);
+        }
         return {
           kind: kind as BehaviorEvidence["kind"],
-          reference: boundedString(evidence.reference, `${evidencePath}.reference`, 300),
+          reference,
         };
       });
     }

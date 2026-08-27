@@ -70,7 +70,7 @@ const DRAFT_INSPECT_SCHEMA = {
   required: ["functionOffset", "functionLimit"],
   properties: {
     functionOffset: { type: "integer", minimum: 0, maximum: 10000 },
-    functionLimit: { type: "integer", minimum: 1, maximum: 20 },
+    functionLimit: { type: "integer", minimum: 1, maximum: 1, description: "Return exactly one compact function record so pagination metadata remains authoritative under the model-output bound." },
   },
 } as const;
 const BEHAVIOR_PROPOSAL_SCHEMA = {
@@ -412,15 +412,47 @@ function resolvedBehaviorReviewStatement(value: unknown): value is string {
     !/^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(value.trim());
 }
 
-function topologyProjection(contract: Record<string, any>): string {
-  return JSON.stringify({
-    constants: contract.constants ?? {},
-    functions: Array.isArray(contract.functions)
-      ? contract.functions.map((fn: Record<string, unknown>) => ({ name: fn.name, parameters: fn.parameters }))
-      : [],
-    targets: contract.targets ?? [],
-    deliverables: contract.deliverables ?? [],
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalJsonValue(child)]),
+  );
+}
+
+function completeBehaviorEvidence(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const evidence = entry as Record<string, unknown>;
+    return ["user-decision", "authoritative-source", "project-policy"].includes(String(evidence.kind)) &&
+      typeof evidence.reference === "string" &&
+      evidence.reference.trim().length > 0 &&
+      !/^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(evidence.reference.trim());
   });
+}
+
+function topologyProjection(contract: Record<string, any>): string {
+  const functions = Array.isArray(contract.functions)
+    ? contract.functions
+      .map((fn: Record<string, unknown>) => ({ name: fn.name, parameters: fn.parameters }))
+      .sort((left: { name: unknown }, right: { name: unknown }) => String(left.name).localeCompare(String(right.name)))
+    : [];
+  const targets = Array.isArray(contract.targets)
+    ? [...contract.targets].sort((left, right) => String(left?.name).localeCompare(String(right?.name)))
+    : [];
+  const deliverables = Array.isArray(contract.deliverables)
+    ? [...contract.deliverables].sort((left, right) =>
+        `${String(left?.target)}\u0000${String(left?.path)}`.localeCompare(`${String(right?.target)}\u0000${String(right?.path)}`),
+      )
+    : [];
+  return JSON.stringify(canonicalJsonValue({
+    constants: contract.constants ?? {},
+    functions,
+    targets,
+    deliverables,
+  }));
 }
 
 function contractSummary(contract: ProjectContract): string {
@@ -1430,6 +1462,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
           throw new RecoverableError("INVALID_PHASE", "Draft inspection requires active Design or Contract Revision Mode");
         }
         const input = params as { functionOffset: number; functionLimit: number };
+        if (!Number.isInteger(input.functionOffset) || input.functionOffset < 0 || !Number.isInteger(input.functionLimit) || input.functionLimit !== 1) {
+          throw new RecoverableError("INVALID_REQUEST", "Draft inspection requires functionOffset >= 0 and functionLimit equal to 1");
+        }
         const draftPath = resolve(state.projectRoot, ".pi/tmp/pi-r-contract-draft.json");
         const raw = await readFile(draftPath, "utf8").then((text) => JSON.parse(text) as Record<string, any>).catch(() => undefined);
         if (!raw) {
@@ -1450,16 +1485,20 @@ export default function piRExtension(pi: ExtensionAPI): void {
             ...(typeof fn.purpose === "string" && fn.purpose.length > 0 ? [] : [`${fn.name}:purpose`]),
             ...(Array.isArray(fn.requirements) && fn.requirements.length > 0 ? [] : [`${fn.name}:requirements`]),
             ...missingCategories.map((category) => `${fn.name}:${category}`),
-            ...(Array.isArray(fn.behaviorEvidence) && fn.behaviorEvidence.length > 0 ? [] : [`${fn.name}:evidence`]),
+            ...(completeBehaviorEvidence(fn.behaviorEvidence) ? [] : [`${fn.name}:evidence`]),
           ];
+          const parameters = Array.isArray(fn.parameters) ? fn.parameters : [];
+          const evidence = Array.isArray(fn.behaviorEvidence) ? fn.behaviorEvidence : [];
           return {
             name: fn.name,
-            parameters: fn.parameters,
+            parameters: parameters.slice(0, 10),
+            parameterCount: parameters.length,
+            parametersTruncated: parameters.length > 10,
             purpose: fn.purpose ?? null,
             requirementCount: Array.isArray(fn.requirements) ? fn.requirements.length : 0,
-            reviewedCategories: BEHAVIOR_REVIEW_CATEGORIES.filter((category) => !missingCategories.includes(category)),
             unresolvedDecisionIds: missing,
-            evidence: fn.behaviorEvidence ?? [],
+            evidenceCount: evidence.length,
+            evidenceKinds: [...new Set(evidence.map((entry: Record<string, unknown>) => entry?.kind).filter((kind: unknown) => typeof kind === "string"))],
           };
         });
         const allUnresolved = functions.flatMap((fn) => [
@@ -1468,7 +1507,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           ...BEHAVIOR_REVIEW_CATEGORIES.filter((category) =>
             !fn.behaviorReview || !resolvedBehaviorReviewStatement(fn.behaviorReview[category]),
           ).map((category) => `${fn.name}:${category}`),
-          ...(Array.isArray(fn.behaviorEvidence) && fn.behaviorEvidence.length > 0 ? [] : [`${fn.name}:evidence`]),
+          ...(completeBehaviorEvidence(fn.behaviorEvidence) ? [] : [`${fn.name}:evidence`]),
         ]);
         const result = {
           status: allUnresolved.length > 0 ? "questions-required" : "ready-for-user-lock-review",
@@ -1481,8 +1520,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
             nextOffset: input.functionOffset + page.length < functions.length ? input.functionOffset + page.length : null,
           },
           unresolvedDecisionCount: allUnresolved.length,
-          unresolvedDecisionIds: allUnresolved.slice(0, 50),
-          unresolvedDecisionIdsTruncated: allUnresolved.length > 50,
+          pageUnresolvedDecisionIds: page.flatMap((fn) => fn.unresolvedDecisionIds),
           nextAction: allUnresolved.length > 0
             ? { actor: "model", action: "Ask concise self-contained questions for these IDs; bounded structural inspection may identify observed candidates but cannot establish semantics" }
             : { actor: "user", command: "/r lock", action: "Review and approve behavior and evidence" },
@@ -1566,7 +1604,10 @@ export default function piRExtension(pi: ExtensionAPI): void {
                 if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
                 const evidence = entry as Record<string, unknown>;
                 return !["user-decision", "authoritative-source", "project-policy"].includes(String(evidence.kind)) ||
-                  typeof evidence.reference !== "string" || evidence.reference.length < 1 || evidence.reference.length > 300;
+                  typeof evidence.reference !== "string" ||
+                  evidence.reference.trim().length < 1 ||
+                  evidence.reference.length > 300 ||
+                  /^(?:tbd|todo|unknown|unresolved|pending|not yet|to be determined)(?:\b|:)/i.test(evidence.reference.trim());
               })
             ) {
               throw new RecoverableError("INVALID_REQUEST", `Behavior evidence for '${String(update.name)}' must identify 1–10 user decisions, authoritative sources, or project policies`);
@@ -1593,9 +1634,8 @@ export default function piRExtension(pi: ExtensionAPI): void {
               fn.requirements.length === 0 ||
               !fn.behaviorReview ||
               typeof fn.behaviorReview !== "object" ||
-              BEHAVIOR_REVIEW_CATEGORIES.some((category) => typeof (fn.behaviorReview as Record<string, unknown>)[category] !== "string") ||
-              !Array.isArray(fn.behaviorEvidence) ||
-              fn.behaviorEvidence.length === 0,
+              BEHAVIOR_REVIEW_CATEGORIES.some((category) => !resolvedBehaviorReviewStatement((fn.behaviorReview as Record<string, unknown>)[category])) ||
+              !completeBehaviorEvidence(fn.behaviorEvidence),
             )
             .map((fn: Record<string, unknown>) => String(fn.name));
           let draftValue: unknown = proposal;

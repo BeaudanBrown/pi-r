@@ -955,6 +955,20 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
   assert.equal(seeded.project.name, original.project.name);
   assert.equal(seeded.contractVersion, undefined);
 
+  const reordered = structuredClone(proposalForContract(original));
+  reordered.functions.reverse();
+  reordered.targets.reverse();
+  await h.tools.find((tool) => tool.name === "r_contract_propose")
+    .execute("reordered-equivalent", reordered, undefined, undefined, ctx);
+  const reorderedDraft = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
+    "inspect-reordered-draft",
+    { functionOffset: 0, functionLimit: 1 },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(reorderedDraft.details.topology.changed, false);
+
   const revised = structuredClone(proposalForContract(original));
   revised.constants.revision_seed = 1;
   revised.functions.push({
@@ -975,7 +989,7 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
     .execute("revision", revised, undefined, undefined, ctx);
   const revisedDraft = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
     "inspect-revised-draft",
-    { functionOffset: 0, functionLimit: 20 },
+    { functionOffset: 0, functionLimit: 1 },
     undefined,
     undefined,
     ctx,
@@ -1548,19 +1562,30 @@ test("legacy behavior requires a behavior-only revision before relocking", { tim
   assert.ok(h.activeToolChanges.at(-1).includes("r_contract_draft_inspect"));
   const draftStatus = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
     "inspect-legacy-draft",
-    { functionOffset: 0, functionLimit: 20 },
+    { functionOffset: 1, functionLimit: 1 },
     undefined,
     undefined,
     ctx,
   );
   assert.equal(draftStatus.details.status, "questions-required");
   assert.equal(draftStatus.details.topology.changed, false);
-  assert.ok(draftStatus.details.unresolvedDecisionIds.includes("make_object:duplicates"));
+  assert.equal(draftStatus.details.functionPage.returned, 1);
+  assert.equal(JSON.parse(draftStatus.content[0].text).modelOutputTruncated, undefined);
+  assert.ok(draftStatus.details.pageUnresolvedDecisionIds.includes("make_object:duplicates"));
   await h.commands[0].options.handler("lock", ctx);
   assert.match(ctx.notifications.at(-1)[0], /lock failed:.*make_object.*purpose.*behavioral requirements|lock failed:.*purpose.*behavioral requirement/is);
   assert.equal((await git(root, "branch", "--show-current")), "pi-r/workbench");
 
   const behaviorTool = h.tools.find((tool) => tool.name === "r_function_behavior_propose");
+  await assert.rejects(behaviorTool.execute("reject-placeholder-evidence", {
+    functions: [{
+      name: "make_object",
+      purpose: "Return the approved bounded object",
+      requirements: ["Return a deterministic object"],
+      behaviorReview: completeBehaviorReview,
+      behaviorEvidence: [{ kind: "user-decision", reference: "TBD" }],
+    }],
+  }, undefined, undefined, ctx), /Behavior evidence.*identify/i);
   const proposed = await behaviorTool.execute("migrate-behavior", {
     functions: [{
       name: "make_object",
