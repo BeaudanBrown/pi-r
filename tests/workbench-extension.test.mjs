@@ -295,6 +295,15 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     await h.handlers.get("tool_call")({ toolName: "read", input: { path: rawCsv } }, ctx),
     { block: true, reason: "pi-r blocks direct raw-data reads; use r_data_inspect for bounded structural evidence" },
   );
+  assert.deepEqual(
+    await h.handlers.get("tool_call")({ toolName: "grep", input: { path: rawCsv, pattern: "secret" } }, ctx),
+    { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" },
+  );
+  assert.equal((await h.handlers.get("tool_call")({ toolName: "grep", input: { path: join(root, "analysis.R"), pattern: "value" } }, ctx)), undefined);
+  assert.deepEqual(
+    await h.handlers.get("tool_call")({ toolName: "grep", input: { path: root, pattern: "secret" } }, ctx),
+    { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" },
+  );
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
   assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.21\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
@@ -441,7 +450,11 @@ test("design mode gates model tools to reads inside approved roots", async () =>
   const gate = h.handlers.get("tool_call");
 
   assert.equal(await gate({ toolName: "read", input: { path: join(root, "analysis.R") } }, ctx), undefined);
-  assert.equal(await gate({ toolName: "grep", input: { pattern: "read", path: attached } }, ctx), undefined);
+  assert.deepEqual(await gate({ toolName: "grep", input: { pattern: "read", path: attached } }, ctx), {
+    block: true,
+    reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect",
+  });
+  assert.equal(await gate({ toolName: "grep", input: { pattern: "read", path: join(attached, "notes.txt") } }, ctx), undefined);
   assert.equal((await gate({ toolName: "read", input: { path: join(outside, "secret.txt") } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "bash", input: { command: "pwd" } }, ctx)).block, true);
   assert.equal((await gate({ toolName: "write", input: { path: join(root, "x") } }, ctx)).block, true);
@@ -1488,6 +1501,8 @@ test("table artifact inspection returns structure and summaries without rows and
 
 test("legacy behavior requires a behavior-only revision before relocking", { timeout: 180_000 }, async (t) => {
   const { root, entries } = await tableArtifactProject();
+  entries[0].data.editableScopeCount = 99;
+  entries[0].data.behaviorBlockedCount = 0;
   const h = harness(entries);
   const ctx = context(root, entries, [true, true]);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));

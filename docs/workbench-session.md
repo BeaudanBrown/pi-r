@@ -18,7 +18,7 @@ On Pi session resume, the extension verifies runtime-state version, canonical wo
 
 ## Design Mode boundary
 
-Design Mode activates built-in `read`, `grep`, `find`, and `ls`, the typed draft-only `r_contract_propose` tool, and the compact persistent R exploration tools. Direct reads of CSV/TSV inputs are blocked in favor of `r_data_inspect`; in Implementation Mode broad searches that traverse a contract-declared raw tabular Source File Target are also blocked. It disables shell and general mutation tools and independently blocks every tool call outside that compact set. Read/search paths are resolved through the filesystem before they are checked against the canonical project root and optional user-attached Read-Only Roots, preventing `..` and symlink escapes. See [Project Contract design and lock](design-lock.md) for the proposal tool and approval transaction.
+Design Mode activates built-in `read`, `grep`, `find`, and `ls`, the typed draft-only `r_contract_propose` tool, and the compact persistent R exploration tools. Direct reads and searches of CSV/TSV inputs are blocked in favor of `r_data_inspect`. Directory-wide content searches are also blocked in every constrained phase; `grep` must name one non-raw text file. It disables shell and general mutation tools and independently blocks every tool call outside that compact set. Read/search paths are resolved through the filesystem before they are checked against the canonical project root and optional user-attached Read-Only Roots, preventing `..` and symlink escapes. See [Project Contract design and lock](design-lock.md) for the proposal tool and approval transaction.
 
 Optional roots may be absolute or relative to the active working directory. Quote a root containing spaces.
 

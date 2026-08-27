@@ -1429,7 +1429,9 @@ export default function piRExtension(pi: ExtensionAPI): void {
           const summary = {
             status: unresolved.length === 0 ? "ready-for-user-lock-review" : "behavior-incomplete",
             updatedFunctions: updates.map((entry) => ({ name: entry.name, basis: entry.basis })),
-            unresolvedFunctions: unresolved,
+            unresolvedFunctionCount: unresolved.length,
+            unresolvedFunctions: unresolved.slice(0, 20),
+            unresolvedFunctionsTruncated: unresolved.length > 20,
             nextAction: unresolved.length === 0
               ? { actor: "user", command: "/r lock", action: "Review and approve the complete behavioral contract" }
               : { actor: "model", action: "Ask the user for unresolved decisions; do not infer them" },
@@ -2327,9 +2329,19 @@ export default function piRExtension(pi: ExtensionAPI): void {
         registerEnvironmentTool();
         registerScoutTool();
       }
+      let restoredAuthority = restored;
+      if (restored.phase === "implementation") {
+        const contract = validateContract(JSON.parse(await readFile(resolve(restored.projectRoot, "pi-r.yml"), "utf8")));
+        const behaviorBlockedCount = unspecifiedBehaviorFunctions(contract).length;
+        restoredAuthority = {
+          ...restored,
+          editableScopeCount: contract.functions.length - behaviorBlockedCount,
+          behaviorBlockedCount,
+        };
+      }
       updateLiveWorker([], false, "session-resumed");
-      enterPhase({ ...restored, workerState: "stopped" });
-      showHud(context, restored);
+      enterPhase({ ...restoredAuthority, workerState: "stopped" });
+      showHud(context, restoredAuthority);
     } catch (error) {
       quarantine(context, `pi-r cannot resume: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -2386,25 +2398,12 @@ export default function piRExtension(pi: ExtensionAPI): void {
           : "pi-r read path is outside approved read-only roots",
       };
     }
-    if (event.toolName === "read" && /\.(?:csv|tsv|tab)(?:\.(?:gz|bz2|xz))?$/i.test(canonical)) {
+    const rawTabularPath = /\.(?:csv|tsv|tab)(?:\.(?:gz|bz2|xz))?$/i.test(canonical);
+    if (event.toolName === "read" && rawTabularPath) {
       return { block: true, reason: "pi-r blocks direct raw-data reads; use r_data_inspect for bounded structural evidence" };
     }
-    if (state.phase === "implementation" && event.toolName === "grep") {
-      const activeProjectRoot = state.projectRoot;
-      const contract = validateContract(JSON.parse(await readFile(resolve(activeProjectRoot, "pi-r.yml"), "utf8")));
-      const sourcePaths = await Promise.all(contract.targets.filter(isSourceFileTarget).map(async (target) => {
-        const declared = contract.constants[target.source.constant];
-        if (typeof declared !== "string" || !/\.(?:csv|tsv|tab)(?:\.(?:gz|bz2|xz))?$/i.test(declared)) return undefined;
-        return realpath(isAbsolute(declared) ? declared : resolve(activeProjectRoot, declared)).catch(() => undefined);
-      }));
-      const traversesRawSource = sourcePaths.some((sourcePath) => {
-        if (!sourcePath) return false;
-        const fromRequested = relative(canonical, sourcePath);
-        return fromRequested === "" || (!fromRequested.startsWith(`..${sep}`) && fromRequested !== ".." && !isAbsolute(fromRequested));
-      });
-      if (traversesRawSource) {
-        return { block: true, reason: "pi-r blocks searches that traverse declared raw inputs; narrow the path to source/docs or use r_data_inspect" };
-      }
+    if (event.toolName === "grep" && (rawTabularPath || (await lstat(canonical)).isDirectory())) {
+      return { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" };
     }
     return undefined;
   });
