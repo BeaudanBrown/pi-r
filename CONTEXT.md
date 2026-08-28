@@ -61,16 +61,16 @@ The single deterministic commit that locks the approved Project Contract and its
 _Avoid_: Checkpoint, save
 
 **Implementation Mode**:
-The post-lock Workbench Session phase in which target/function topology is locked, Approved Function bodies may become editable through scoped capabilities, and dependency-only changes use the governed environment workflow.
-_Avoid_: Coding mode, write mode
+The post-lock iterative Workbench Session phase in which structural topology stays locked while provisional changes may be made under R/, tests/, and docs/ through ordinary project edits or optional scoped capabilities.
+_Avoid_: Unrestricted shell, behavior approval gate
 
 **Contract Revision Mode**:
 The user-entered Workbench Session phase that seeds an ignored Contract Draft from the locked Project Contract while leaving committed source unchanged. It permits topology revision until user-approved relock or cancellation.
 _Avoid_: Automatic mode switch, unlocked implementation, environment change
 
 **Scoped Mutation**:
-One stale-safe replacement or exact patch confined to an Approved Function body, validated before one provenance commit.
-_Avoid_: Edit, write
+An optional stale-safe replacement or exact patch confined to an Approved Function body, validated before one provenance commit. It is a precision adapter, not the only implementation path.
+_Avoid_: Required inspection grant
 
 **Source Digest**:
 The SHA-256 token returned by Approved Function inspection and required by a Scoped Mutation to reject stale source.

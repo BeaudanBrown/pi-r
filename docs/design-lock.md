@@ -1,27 +1,27 @@
-# Project Contract design and lock
+# Structural Project Contract design and lock
 
-An active Design Mode exposes `r_contract_propose`. Its parameters are the complete Project Contract decision schema. Each call performs strict schema and semantic validation and, on success, atomically replaces the session's single draft at `.pi/tmp/pi-r-contract-draft.json`. Before proposing, the agent uses `r_contract_draft_inspect` overview to summarize up to five functions at once and function detail only when preparing questions. It reports actual topology differences and distinguishes missing review fields from genuine operator decisions. It must ask the operator self-contained questions, use bounded structural observations only to sharpen those questions, and distinguish explicit user decisions or authoritative documentation from observations. An implementation request is not behavioral approval.
+Design Mode defines durable project topology rather than a complete analytical specification.
 
-The draft is excluded through the repository's local Git exclude file, so proposing or revising it does not alter committed source. Invalid proposals leave the previous valid draft intact and return the validator diagnostic.
+The typed `r_contract_propose` draft declares:
 
-## Review and approval
+- project identity and pinned Nix source;
+- source inputs and constants;
+- Approved Function names and parameters;
+- package dependencies;
+- targets and their graph;
+- generated file outputs; and
+- publishable deliverables.
 
-```console
-/r lock
-```
+Function purpose and requirements are optional descriptive notes. Behavioral review matrices, exact-quote evidence, and structured decision ledgers are not required and do not gate implementation.
 
-Lock first rejects any Approved Function lacking purpose, requirements, structured decisions, verified evidence, or a non-placeholder review of every behavioral category; legacy contracts remain readable but cannot be relocked unchanged. It then displays `R:locking` progress while it revalidates the Workbench Session and draft, checks source authority, resolves packages, realises the exact Nix/R environment, loads namespaces, probes the sandboxed worker, and prepares the approval diff. Completion or cancellation reports elapsed time. The environment validation process reports its own immutable `Rscript` path, avoiding a second `nix develop` used only for runtime discovery.
+`r_contract_draft_inspect` returns a compact authoritative overview of project identity, dependencies, constants, functions, targets, deliverables, and whether structural topology changed. The ignored draft remains under `.pi/tmp/` until the user approves `/r lock` or cancels revision.
 
-Before asking for confirmation, lock rejects tracked source changes. The confirmation contains:
+## `/r lock`
 
-- Approved Function names, parameters, purpose, requirements, complete category review, structured high-risk decisions, and evidence basis;
-- canonical constants;
-- R package dependencies;
-- the target dependency graph, Artifact Kinds, and Dynamic Patterns; and
-- a bounded deterministic diff of every generated scaffold file.
+Lock validates source-file authority, package resolution, generated scaffold integrity, and sandboxed project R startup. It previews the structural contract and complete generated-source diff, then creates one provenance commit after interactive user confirmation.
 
-Cancellation writes nothing and preserves the draft for revision.
+Lock grants permission to begin provisional implementation; it does not claim that analytical behavior is complete or scientifically approved.
 
-On approval, pi-r writes the canonical contract and complete scaffold as one logical transaction. Any write, staging, or commit failure restores prior file contents and index state. A single commit named `Lock pi-r project contract` records contract hash, template version, and policy version trailers. No unrelated path is staged or committed.
+## Revision
 
-A successful commit persists Implementation Mode with the new HEAD, locked contract state, effective editable count, and zero behavior-blocked functions. The proposal tool is removed from the active compact tool set; scoped implementation capabilities are introduced by the implementation workflow.
+User-only `/r revise` is required for structural changes: constants, inputs, dependencies, function names or parameters, targets, generated outputs, or deliverables. Documentation, tests, and function-body behavior evolve directly in Implementation Mode. `/r cancel-revision` discards the structural draft without changing committed source.

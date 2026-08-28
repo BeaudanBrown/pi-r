@@ -27,7 +27,7 @@ Target runs use the generated pipeline's `workspace_on_error = TRUE`. A failure 
 
 ## Failed-workspace diagnosis
 
-After a failed run, `r_target_workspace` accepts the canonical failed target identity returned by the runner, including a dynamic branch identity. It starts or reuses the generated-project Persistent R Worker and asks `targets` to load the saved workspace there without sourcing mutable code or loading undeclared packages. Upstream objects become temporary worker objects and persist across later `evaluate_r` calls.
+After a failed run, `r_target_workspace` accepts the canonical failed target identity returned by the runner, including a dynamic branch identity. It starts or reuses the generated-project Persistent R Worker and asks `targets` to load the saved workspace there without sourcing mutable code or loading undeclared packages. Upstream objects become temporary worker objects and persist across later `r_exec` calls.
 
 Loading a workspace never changes source, target metadata, or Git history. A missing workspace returns `TARGET_WORKSPACE_LOAD_FAILED` with recovery guidance. A target run invalidates canonical target objects already held by the worker so later exploration cannot mistake stale target state for current metadata.
 

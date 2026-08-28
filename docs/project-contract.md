@@ -1,48 +1,30 @@
-# Project contract and generated scaffold
+# Project Contract
 
-A **Project Contract** is the machine-managed source of truth for a constrained analysis project. The version-1 shape is published as [`resources/project-contract.schema.json`](../resources/project-contract.schema.json); CLI validation also enforces semantic references and graph rules that JSON Schema cannot express.
+The Project Contract is the machine-managed declaration of durable project structure.
 
-See [`tests/fixtures/project-contract.yml`](../tests/fixtures/project-contract.yml) for a complete example.
+It contains:
 
-## Contract rules
+- contract, template, and technology-policy versions;
+- project identity and exact Nixpkgs pin;
+- approved dependencies and dependency records;
+- constants and source paths;
+- Approved Function names and required parameters;
+- target definitions, arguments, artifact kinds, and dynamic patterns;
+- generated file outputs; and
+- Versioned Deliverables.
 
-- Every Approved Function lists required parameter names plus a user-approved `purpose`, behavioral `requirements`, a complete `behaviorReview`, durable `behaviorEvidence`, and structured `behaviorDecisions`; bodies, defaults, and variadic arguments are not representable. The review covers input shape, missing values, duplicates, numeric parsing, categorical coding, cohort selection, joins, events/time, output schema, ordering/uniqueness, and side effects. Each category states its rule or why it is not applicable; unresolved placeholders are prohibited. Evidence identifies a user decision, authoritative source, or project policy. User-decision evidence includes a stable decision ID, self-contained question with assistant-message hash, exact answer quote, and user-message hash produced by `r_behavior_decision_record`; general paraphrases cannot be submitted as approval. Structured decisions make missing-value policy and output shape explicit and, when applicable, record duplicate ordering, categorical dictionary/unknown-code policy, join keys/unmatched-row treatment, and event-date/censoring definitions. Legacy locked contracts without this complete review remain readable and existing targets can still run, but affected functions are excluded from effective edit scopes until user-approved Contract Revision completes them.
-- Every ordinary target calls exactly one Approved Function. Its named arguments plus any explicit generated-file output binding exactly match that function's parameters. Package calls such as `data.table::fread()` belong inside an Approved Function body, not directly in the target declaration.
-- Constants are canonical scalar strings, finite numbers, booleans, or null. An argument references either one target or one canonical constant; inline target literals are not representable.
-- Target references must form an acyclic graph.
-- Artifact kinds are `table`, `object`, and `file`. Table and object artifacts generate `format = "qs"`, which current `targets` implements with the maintained `qs2` package; file artifacts generate `format = "file"`.
-- A **Source File Target** tracks one existing read-only input through `source: { constant }`, uses empty `arguments`, and omits `function`, `output`, and `pattern`. It renders directly as `tar_target(name, PI_R_CONSTANTS$constant, format = "file")`, requires no artificial path-returning function, and cannot be a Versioned Deliverable. Paths may be project-relative or absolute beneath a user-attached Read-Only Root; contract lock resolves them canonically, requires them to exist, and rejects any generated-output collision.
-- A generated file target declares one exact writable project-local output through `output: { parameter, constant }`. The parameter is omitted from ordinary arguments, belongs to the Approved Function, and receives the referenced safe project-relative string constant. Legacy locked contracts using inferred path-parameter names remain readable. Target execution rejects canonical path escapes and tracked paths except for the same target's explicitly versioned deliverable.
-- Dynamic patterns are optional and limited to `map` or `cross`. Every pattern dimension must also be a target argument. Static branching forms are not representable.
-- Optional versioned `deliverables` bind a non-dynamic file target to its exact output path. Other file-target outputs are ignored exactly; see [Versioned deliverable publication](deliverable-publication.md).
-- Target names must differ from Approved Function names, preventing ambiguous commands and apparent self-dependencies.
-- Zero Approved Functions and zero targets represent a semantically empty pipeline; generation still emits valid targets infrastructure ending in `list()` without placeholders.
-- Contract, template, policy, and Nixpkgs revisions are pinned. The model-facing proposal omits these authority-owned values; pi-r injects versions and the exact Nixpkgs input used to package the workbench.
-- Dependencies resolve only from pinned Nixpkgs. Optional `dependencyApprovals` entries record the domain, rationale, original policy status, and project/shared scope of reviewed choices; see [Governed R package environments](environment-governance.md).
+Approved Function bodies are never part of the contract. `purpose` and `requirements` remain optional descriptive metadata for compatibility and navigation; they are not semantic authority and never block implementation. Historical behavior-review, evidence, and structured-decision fields remain readable in existing contracts but are deprecated and omitted from new model proposals.
 
-## Generated ownership
+## Structural authority
 
-Generation writes these **Machine-Owned Files**:
+The contract protects topology that generated infrastructure and targets depend upon. Adding, removing, renaming, or changing a function signature, constant, source input, dependency, target, output, or deliverable requires Contract Revision and user-approved `/r lock`.
 
-- `pi-r.yml`
-- `.pi-r/manifest.json`
-- `_targets.R`
-- `R/constants.R`
-- `flake.nix` and `flake.lock`
-- `.envrc` and `.gitignore`
+Function-body behavior, tests, and living analytical documentation evolve provisionally in Implementation Mode. Consequential decisions should be recorded in `docs/analysis-plan.md` and executable synthetic tests rather than duplicated into a lock schema.
 
-Generated pipelines enable `workspace_on_error`, allowing the controlled runner to retain failed target inputs for temporary diagnosis.
+## Source and output targets
 
-Their complete contents must match the contract. Each Approved Function also gets one `R/<name>.R` file whose initial body fails closed with `stop("Not implemented")`; unfinished functions are never silently generated as identity operations. Only its body is implementation-owned; all bytes outside that Tree-sitter body range remain contract-owned. Contract Revision preserves implemented bodies only when names, signatures, purpose, requirements, review, evidence, and structured decisions remain unchanged. New, signature-changed, or behavior-changed functions return to fail-closed stubs; deleted functions are removed.
+An existing input is a Source File Target with `artifact: file` and `source.constant`; it does not call a function and cannot be a deliverable. A generated file target calls an Approved Function and binds its output parameter to a declared path constant. Versioned Deliverables name exact generated file targets and repository-relative publication paths.
 
-The generated `pi-r.yml` is canonical JSON with a YAML extension. JSON is valid YAML 1.2, and this representation makes semantically identical input formatting converge to byte-identical locked contracts.
+## Validation
 
-## CLI
-
-```console
-pi-r contract validate contract.yml
-pi-r contract generate contract.yml path/to/new-project
-pi-r contract check contract.yml path/to/project
-```
-
-All commands return the shared JSON envelope. Generation refuses to overwrite an existing output directory. Checking regenerates expected Machine-Owned Files in memory, checks function structure through Tree-sitter, and returns `DRIFT_DETECTED` with sorted paths when anything contract-owned differs.
+Contract validation checks canonical names, exact parameter bindings, target acyclicity, source/output separation, package records, deliverable eligibility, and canonical paths. Lock additionally validates the generated environment, scaffold, and sandboxed project worker before committing one provenance transaction.
