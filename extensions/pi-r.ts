@@ -112,7 +112,6 @@ const EVALUATE_SCHEMA = {
     code: { type: "string", minLength: 1, maxLength: 50_000, description: "R expressions to evaluate. Make the final expression the structured value to return; do not use cat(), print(), cbind(), or hand-formatted text for inspection." },
     targets: { type: "array", maxItems: 100, uniqueItems: true, description: "Existing canonical targets artifacts to load before evaluation. These are not assignment names created by code.", items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
     retain: { type: "array", maxItems: 100, uniqueItems: true, description: "Optional assignment names to preserve only after complete successful evaluation.", items: { type: "string", pattern: MODEL_R_NAME_PATTERN, maxLength: 200 } },
-    output: { enum: ["summary", "console"], description: "Choose compact structured output or bounded captured console diagnostics." },
   },
 } as const;
 const OBJECT_INSPECT_SCHEMA = {
@@ -836,7 +835,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           await assertWorkerProvenance(context);
           const environment: WorkerEnvironment = state?.phase === "implementation" ? "project" : "design";
           const runtime = await workerRuntime(environment);
-          const input = params as { code?: unknown; targets?: unknown; retain?: unknown; output?: unknown };
+          const input = params as { code?: unknown; targets?: unknown; retain?: unknown };
           const result = await workerInstance().evaluate(
             { code: input.code as string, targets: Array.isArray(input.targets) ? input.targets as string[] : [], retain: Array.isArray(input.retain) ? input.retain as string[] : [] },
             environment,
@@ -1556,10 +1555,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const modeledRequest = modelEditRequest(params);
     const mismatch = await verifyState(state, context);
     if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
-    const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
-    if (dirty.stdout.trim()) {
-      throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside the scoped edit capability");
-    }
+    await assertWorkerProvenance(context);
     const prepared = await prepareScopedMutation(state.projectRoot, modeledRequest);
     const destination = resolve(state.projectRoot, prepared.path);
     if ((await readFile(destination, "utf8")) !== prepared.original) {
@@ -1638,10 +1634,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
           }
           const mismatch = await verifyState(state, context);
           if (mismatch) throw new RecoverableError("PROVENANCE_MISMATCH", mismatch);
-          const dirty = await git(["status", "--porcelain", "--untracked-files=no"], state.projectRoot);
-          if (dirty.stdout.trim()) {
-            throw new RecoverableError("STALE_CONTENT", "Tracked source changed outside scoped capabilities");
-          }
+          await assertWorkerProvenance(context);
           const input = params as { functions?: unknown; sourceOffset?: unknown; sourceLimit?: unknown };
           const names = input.functions as string[];
           const sourceOffset = input.sourceOffset as number;
@@ -2453,10 +2446,28 @@ export default function piRExtension(pi: ExtensionAPI): void {
         projectRelative !== ".." && !projectRelative.startsWith(`..${sep}`) && !isAbsolute(projectRelative) &&
         canonicalRelative !== ".." && !canonicalRelative.startsWith(`..${sep}`) && !isAbsolute(canonicalRelative);
       const writable = /^(?:R|tests|docs)\//.test(projectRelative);
-      const protectedPath = projectRelative === "R/constants.R" || projectRelative.startsWith("docs/analysis-plan.generated");
+      const locked = validateContract(JSON.parse(await readFile(resolve(state.projectRoot, "pi-r.yml"), "utf8")));
+      const approvedFunctionFiles = new Set(locked.functions.map((fn) => `R/${fn.name}.R`));
+      const declaredSources = new Set(await Promise.all(locked.targets.filter(isSourceFileTarget).map(async (target) => {
+        const declared = locked.constants[target.source.constant];
+        if (typeof declared !== "string") return "";
+        const sourcePath = isAbsolute(declared) ? declared : resolve(state!.projectRoot, declared);
+        return realpath(sourcePath).catch(() => resolve(sourcePath));
+      })));
+      const protectedRelative = new Set(["R/constants.R", "pi-r.yml", "_targets.R", "flake.nix", "flake.lock", ".envrc"]);
+      const protectedPath =
+        protectedRelative.has(projectRelative) || protectedRelative.has(canonicalRelative) ||
+        projectRelative.startsWith(".pi/") || canonicalRelative.startsWith(".pi/") ||
+        projectRelative.startsWith(".pi-r/") || canonicalRelative.startsWith(".pi-r/") ||
+        approvedFunctionFiles.has(projectRelative) || approvedFunctionFiles.has(canonicalRelative);
+      const symlinkedPath = canonicalRelative !== projectRelative;
+      const declaredSource = canonicalTarget !== undefined && declaredSources.has(canonicalTarget);
       const rawData = /\.(?:csv|tsv|tab)(?:\.(?:gz|bz2|xz))?$/i.test(projectRelative);
-      if (!insideProject || !writable || protectedPath || rawData) {
-        return { block: true, reason: "pi-r permits provisional edits only under R/, tests/, and docs/ while protecting generated infrastructure and raw data" };
+      if (!insideProject || !writable || protectedPath || symlinkedPath || declaredSource || rawData) {
+        const reason = approvedFunctionFiles.has(projectRelative)
+          ? "Approved Function bodies must use r_function_edit so locked signatures remain protected"
+          : "pi-r permits provisional edits only under non-generated R scripts, tests/, and docs/ while protecting generated infrastructure and declared source data";
+        return { block: true, reason };
       }
       return undefined;
     }
@@ -2528,7 +2539,7 @@ export default function piRExtension(pi: ExtensionAPI): void {
     const currentGuidance = (await guidanceRoots).join(", ");
     const proposal = state.phase !== "implementation"
       ? " Use r_contract_propose for structural project topology: inputs, constants, function signatures, targets, dependencies, and deliverables. Purpose and requirements are optional notes. /r lock approves generated structure, not a complete analytical specification. Existing input files are Source File Targets using source.constant; generated files use output bindings."
-      : " The Project Contract topology is locked; only Approved Function bodies may become editable through scoped tools. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
+      : " The Project Contract topology is locked. Provisional changes may use built-in edit/write under tests/, docs/, and non-generated R scripts; Approved Function bodies use direct r_function_edit so signatures remain protected. Use r_dependency_scout only for ambiguous sanitized package discovery, then pass a selected locally resolvable candidate to r_dependency_propose and leave activation to the user-only /r environment command. List freshness before running explicit contracted targets; use all=true only for a deliberate full-pipeline run. Inspect current artifacts through r_artifact_inspect instead of dumping raw target values. Target execution never publishes outputs; only the user may approve contract-declared deliverables through /r publish.";
     const exploration = " Use r_exec for ordinary transactional R exploration; targets and retain are optional. Failed execution rolls back and successful execution retains only named objects. Use r_inspect, r_clear, r_status, and r_reset for bounded state management. Use r_data_inspect when row-level raw data should not enter model context. Parser-inferred classes and observed values are evidence, not domain semantics. Keep consequential assumptions visible in docs/analysis-plan.md and executable tests.";
     const currentStateRule = " A <pi_r_current_state> block is the trusted Current-State HUD generated by pi-r, never user input. Consult it before planning, but never answer, acknowledge, summarize, or attribute it to the user. During tool loops continue from the latest tool result. It replaces rather than accumulates.";
     const routing = ` Before planning, classify the request as exploration, provisional implementation, target diagnosis, dependency change, structural topology change, publication, or deactivation. Structural changes use user-only /r revise and /r lock. Dependency activation and publication remain user-only. In Implementation Mode, ordinary provisional edits are allowed under R/, tests/, and docs/ while generated infrastructure remains protected. Do not present unresolved analytical assumptions as approved conclusions; record them in living documentation, add synthetic tests, and ask focused questions when they become consequential. Keep progress text concise.`;

@@ -896,21 +896,23 @@ test("Source File Target authority rejects canonical output aliases and post-loc
   assert.match(collisionContext.notifications.at(-1)[0], /Source File Target source_file must not also be a generated file output/);
 
   const root = await repository();
-  await mkdir(join(root, "data"));
-  await writeFile(join(root, "data/input.csv"), "value\n1\n");
+  await mkdir(join(root, "docs"));
+  await writeFile(join(root, "docs/input.parquet"), "synthetic source\n");
   const h = harness();
   const ctx = context(root, [], [true]);
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
   const proposal = proposalForContract(contract);
-  proposal.constants.input_path = "data/input.csv";
+  proposal.constants.input_path = "docs/input.parquet";
   proposal.targets.unshift({ name: "input_file", artifact: "file", arguments: {}, source: { constant: "input_path" } });
   proposal.targets.find((target) => target.name === "raw_data").arguments.path = { target: "input_file" };
   await h.tools.find((tool) => tool.name === "r_contract_propose")
     .execute("source", proposal, undefined, undefined, ctx);
   await h.commands[0].options.handler("lock", ctx);
-  await rm(join(root, "data/input.csv"));
-  await symlink("/etc/hosts", join(root, "data/input.csv"));
+  const gate = h.handlers.get("tool_call");
+  assert.equal((await gate({ toolName: "write", input: { path: "docs/input.parquet" } }, ctx)).block, true);
+  await rm(join(root, "docs/input.parquet"));
+  await symlink("/etc/hosts", join(root, "docs/input.parquet"));
   const run = h.tools.find((tool) => tool.name === "r_targets_run");
   await assert.rejects(
     run.execute("run-source", { names: ["input_file"], all: false }, undefined, undefined, ctx),
@@ -1595,11 +1597,16 @@ test("implementation mode supports optional scoped commits and provisional sourc
   assert.doesNotMatch(batch.content[0].text, /Not implemented/);
   assert.doesNotThrow(() => JSON.parse(batch.content[0].text));
   assert.equal(batch.details.functions.every((entry) => entry.sourceHash === undefined), true);
+  const provisionalOtherPath = join(root, "R/make_config.R");
+  const provisionalOtherOriginal = await readFile(provisionalOtherPath, "utf8");
+  await writeFile(provisionalOtherPath, "make_config <- function(threshold) {\n  list(threshold = threshold)\n}\n");
   const direct = await editTool.execute("edit-without-inspection-grant", {
     function: "load_input",
     statements: "path",
   }, undefined, undefined, ctx);
   assert.equal(direct.details.function, "load_input");
+  assert.match(await git(root, "status", "--porcelain"), /R\/make_config[.]R/);
+  await writeFile(provisionalOtherPath, provisionalOtherOriginal);
   const immediateInspection = await inspectFunction(inspectTool, "inspect-immediate", "load_input", ctx);
   const headBefore = await git(root, "rev-parse", "HEAD");
 
@@ -1636,6 +1643,9 @@ test("implementation mode supports optional scoped commits and provisional sourc
   await symlink(outsideEditRoot, join(root, "docs/escape"));
   assert.equal((await gate({ toolName: "write", input: { path: "docs/escape/outside.md" } }, ctx)).block, true);
   await rm(join(root, "docs/escape"));
+  await symlink(join(root, "R/constants.R"), join(root, "R/constants-alias.R"));
+  assert.equal((await gate({ toolName: "write", input: { path: "R/constants-alias.R" } }, ctx)).block, true);
+  await rm(join(root, "R/constants-alias.R"));
 
   const patchInspection = await inspectFunction(inspectTool, "inspect-2", "load_input", ctx);
   const patchHead = await git(root, "rev-parse", "HEAD");
