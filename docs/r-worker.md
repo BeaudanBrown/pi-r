@@ -10,7 +10,7 @@ Pi-r exposes one small worker interface:
 
 ## `r_exec`
 
-Only `code` is required. `targets` may name existing pipeline artifacts to load, and `retain` may name assignments to preserve after success. `output` selects compact structured or bounded console-oriented reporting.
+Only `code` is required. `targets` may name existing pipeline artifacts to load, and `retain` may name assignments to preserve after success. Results and captured diagnostics are always returned through one bounded structured envelope.
 
 The worker parses the complete expression, constructs deterministic project context, clones temporary bindings into a staged environment, and evaluates there. Failure commits nothing. Success commits only names listed in `retain`; all other new or modified assignments are discarded. Structured results, warnings, messages, and state changes are bounded before entering model context.
 
