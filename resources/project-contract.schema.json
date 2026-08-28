@@ -91,7 +91,7 @@
         "properties": {
           "name": {
             "$ref": "#/$defs/rName",
-            "description": "Approved Function name. The contract declares signature and reviewed observable behavior but no R body; locking creates a fail-closed body stub."
+            "description": "Approved Function name. The structural contract declares its signature but no R body; locking creates a fail-closed body stub for provisional implementation."
           },
           "parameters": {
             "type": "array",
@@ -103,14 +103,14 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 500,
-            "description": "User-approved domain purpose for implementation. Required for new Design and Revision proposals; absent only in legacy locked contracts."
+            "description": "Optional descriptive purpose for navigation and living documentation; never an implementation gate."
           },
           "requirements": {
             "type": "array",
             "minItems": 1,
             "maxItems": 10,
             "uniqueItems": true,
-            "description": "User-approved behavioral requirements, including relevant missing-value, duplicate, coding, cohort, and output rules. Requirements contain no R body code.",
+            "description": "Optional descriptive notes retained for compatibility. Consequential analytical behavior belongs in living documentation and tests.",
             "items": { "type": "string", "minLength": 1, "maxLength": 300 }
           },
           "behaviorReview": {
@@ -130,7 +130,7 @@
               "ordering-uniqueness": { "type": "string", "minLength": 1, "maxLength": 300 },
               "side-effects": { "type": "string", "minLength": 1, "maxLength": 300 }
             },
-            "description": "Complete review of every behavior category. Each value states the locked rule or why the category is not applicable. Unresolved placeholders are prohibited."
+            "description": "Deprecated legacy metadata. Readable for migration but omitted from new proposals and never implementation-blocking."
           },
           "behaviorEvidence": {
             "type": "array",

@@ -164,7 +164,7 @@ export class SandboxedRWorker {
       !Array.isArray(request.targets) || request.targets.some((name) => !validRName(name)) ||
       !Array.isArray(request.retain) || request.retain.some((name) => !validRName(name))
     ) {
-      throw new RecoverableError("INVALID_REQUEST", "evaluate_r requires code plus arrays of canonical target and retained-object names");
+      throw new RecoverableError("INVALID_REQUEST", "r_exec requires code and, when provided, arrays of canonical target and retained-object names");
     }
     const started = await this.#ensureStarted(environment, rscript);
     const transientStateLost = this.#transientStateLost;
@@ -216,7 +216,7 @@ export class SandboxedRWorker {
     request: { name: string; columns: string[]; columnOffset: number; columnLimit: number },
   ): Promise<{ name: string; summary: unknown; error: unknown; objects: WorkerObject[] }> {
     if (!validRName(request.name)) {
-      throw new RecoverableError("INVALID_REQUEST", "r_object_inspect requires one canonical object name of at most 200 characters");
+      throw new RecoverableError("INVALID_REQUEST", "r_inspect requires one canonical object name of at most 200 characters");
     }
     if (!this.#child || this.#state !== "running") {
       throw new RecoverableError("WORKER_STOPPED", "No running worker contains objects to inspect");
@@ -328,6 +328,9 @@ export class SandboxedRWorker {
       throw new RecoverableError("WORKER_START_FAILED", "Packaged value-summary runtime is unavailable");
     }
     args.push("--setenv", "PI_R_VALUE_SUMMARY_SCRIPT", valueSummaryScript);
+    if (process.env.PI_R_REAL_WORKER_SCRIPT) {
+      args.push("--setenv", "PI_R_REAL_WORKER_SCRIPT", process.env.PI_R_REAL_WORKER_SCRIPT);
+    }
     args.push(
       "--setenv", "HOME", "/tmp/pi-r-home",
       "--setenv", "TMPDIR", "/tmp",

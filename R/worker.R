@@ -168,7 +168,7 @@ handle_evaluate <- function(request) {
         code = if (grepl("unexpected|parse", conditionMessage(condition), ignore.case = TRUE)) "R_PARSE_ERROR" else "R_EVALUATION_ERROR",
         message = substr(conditionMessage(condition), 1L, 2000L),
         recoverable = TRUE,
-        recovery = c("Revise the expression or requested target names", "Use r_worker_status to inspect committed objects")
+        recovery = c("Revise the expression or requested target names", "Use r_status to inspect committed objects")
       )
     }
   )

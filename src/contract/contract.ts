@@ -274,26 +274,6 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
   const project = object(proposal.project, "proposal.project");
   exactKeys(project, ["name"], "proposal.project");
   const issues = proposalSemanticIssues(proposal);
-  if (Array.isArray(proposal.functions)) {
-    proposal.functions.forEach((entry, index) => {
-      const candidate = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
-      if (typeof candidate.purpose !== "string" || candidate.purpose.length === 0) {
-        issues.push(`functions[${index}].purpose: new proposals must state the user-approved domain purpose`);
-      }
-      if (!Array.isArray(candidate.requirements) || candidate.requirements.length === 0) {
-        issues.push(`functions[${index}].requirements: new proposals must state at least one user-approved behavioral requirement`);
-      }
-      if (!candidate.behaviorReview || typeof candidate.behaviorReview !== "object" || Array.isArray(candidate.behaviorReview)) {
-        issues.push(`functions[${index}].behaviorReview: new proposals must review every behavioral category`);
-      }
-      if (!Array.isArray(candidate.behaviorEvidence) || candidate.behaviorEvidence.length === 0) {
-        issues.push(`functions[${index}].behaviorEvidence: new proposals must identify user, source, or policy evidence`);
-      }
-      if (!candidate.behaviorDecisions || typeof candidate.behaviorDecisions !== "object" || Array.isArray(candidate.behaviorDecisions)) {
-        issues.push(`functions[${index}].behaviorDecisions: new proposals must state structured high-risk decisions`);
-      }
-    });
-  }
   if (issues.length > 0) {
     invalid(`proposal has ${issues.length} semantic issue${issues.length === 1 ? "" : "s"}:\n- ${issues.join("\n- ")}\nAll listed issues must be corrected together; unlisted fields have not yet passed authoritative validation.`, {
       issues,
@@ -308,33 +288,13 @@ export function normalizeContractProposal(input: unknown, nixpkgs: NixpkgsPin): 
   });
 }
 
-export function unspecifiedBehaviorFunctions(contract: ProjectContract): string[] {
-  return contract.functions
-    .filter((fn) =>
-      typeof fn.purpose !== "string" ||
-      fn.purpose.length === 0 ||
-      !Array.isArray(fn.requirements) ||
-      fn.requirements.length === 0 ||
-      !fn.behaviorReview ||
-      BEHAVIOR_REVIEW_CATEGORIES.some((category) => !fn.behaviorReview?.[category]) ||
-      !Array.isArray(fn.behaviorEvidence) ||
-      fn.behaviorEvidence.length === 0 ||
-      fn.behaviorEvidence.some((evidence) => evidence.kind === "user-decision" && (!evidence.decisionId || !evidence.question || !evidence.questionHash || !evidence.answer || !evidence.messageHash)) ||
-      !fn.behaviorDecisions,
-    )
-    .map((fn) => fn.name);
+/** @deprecated Behavioral notes are descriptive and never block implementation. */
+export function unspecifiedBehaviorFunctions(_contract: ProjectContract): string[] {
+  return [];
 }
 
 export function validateLockableContract(input: unknown): ProjectContract {
-  const contract = validateContract(input);
-  const unspecified = unspecifiedBehaviorFunctions(contract);
-  if (unspecified.length > 0) {
-    invalid(
-      `contract cannot be locked: ${unspecified.length} Approved Function${unspecified.length === 1 ? "" : "s"} lack complete purpose, requirements, review, structured decisions, or verified evidence: ${unspecified.join(", ")}. Use the behavior proposal capability and resolve every missing decision before /r lock`,
-      { code: "BEHAVIOR_INCOMPLETE", functions: unspecified },
-    );
-  }
-  return contract;
+  return validateContract(input);
 }
 
 export function validateContract(input: unknown): ProjectContract {

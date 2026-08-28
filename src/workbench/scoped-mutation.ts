@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { unspecifiedBehaviorFunctions, validateContract } from "../contract/contract.js";
+import { validateContract } from "../contract/contract.js";
 import type { ApprovedFunction } from "../contract/types.js";
 import { RecoverableError } from "../r-edit/errors.js";
 import { createEditCandidate } from "../r-edit/scoped-edit.js";
@@ -16,7 +16,7 @@ const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 export interface ScopedMutationRequest {
   function: string;
-  expectedSourceHash: string;
+  expectedSourceHash?: string;
   operation: EditOperation;
 }
 
@@ -65,8 +65,8 @@ function validateRequest(input: unknown): ScopedMutationRequest {
   if (typeof request.function !== "string" || !request.function) {
     throw new RecoverableError("INVALID_REQUEST", "Scoped edit request requires an Approved Function name");
   }
-  if (typeof request.expectedSourceHash !== "string" || !HASH_PATTERN.test(request.expectedSourceHash)) {
-    throw new RecoverableError("INVALID_REQUEST", "expectedSourceHash must be a sha256 digest of the current function file");
+  if (request.expectedSourceHash !== undefined && (typeof request.expectedSourceHash !== "string" || !HASH_PATTERN.test(request.expectedSourceHash))) {
+    throw new RecoverableError("INVALID_REQUEST", "expectedSourceHash, when provided, must be a sha256 digest of the current function file");
   }
   const operation = request.operation;
   if (
@@ -79,7 +79,7 @@ function validateRequest(input: unknown): ScopedMutationRequest {
   ) {
     throw new RecoverableError("INVALID_REQUEST", "operation must be a body replacement or non-empty exact patch");
   }
-  return { function: request.function, expectedSourceHash: request.expectedSourceHash, operation };
+  return { function: request.function, ...(request.expectedSourceHash ? { expectedSourceHash: request.expectedSourceHash } : {}), operation };
 }
 
 const POLICY_SCRIPT = String.raw`
@@ -184,7 +184,7 @@ export async function inspectApprovedFunctions(
     }
     const path = `R/${approved.name}.R`;
     const source = await readFile(resolve(root, path), "utf8");
-    const specified = !unspecifiedBehaviorFunctions(contract).includes(approved.name);
+      const specified = true;
     return {
       contractHash,
       contractVersion: contract.contractVersion,
@@ -201,9 +201,7 @@ export async function inspectApprovedFunctions(
         review: approved.behaviorReview ?? null,
         evidence: approved.behaviorEvidence ?? [],
         decisions: approved.behaviorDecisions ?? null,
-        agentAction: specified
-          ? "Implement only the locked purpose and requirements"
-          : "Legacy behavior is unspecified; ask the user for requirements before inventing domain rules",
+        agentAction: "Implement provisionally, keep analytical assumptions visible in documentation and tests, and ask the user about consequential unresolved semantics",
       },
     };
   }));
@@ -219,20 +217,9 @@ export async function inspectApprovedFunction(
 export async function prepareScopedMutation(projectRoot: string, input: unknown): Promise<PreparedScopedMutation> {
   const request = validateRequest(input);
   const inspection = await inspectApprovedFunction(projectRoot, request.function);
-  if (!inspection.behavior.specified) {
-    throw new RecoverableError(
-      "BEHAVIOR_UNSPECIFIED",
-      `Approved Function '${inspection.function}' belongs to a legacy contract without locked behavioral requirements`,
-      { remainingParallelEditsWillFail: true },
-      {
-        retryable: false,
-        agentAction: "Stop implementation planning. Do not inspect data or summarize inferred requirements; ask the user to enter /r revise and approve purpose and requirements",
-      },
-    );
-  }
   const path = resolve(projectRoot, inspection.path);
   const original = inspection.source;
-  if (inspection.sourceHash !== request.expectedSourceHash) {
+  if (request.expectedSourceHash !== undefined && inspection.sourceHash !== request.expectedSourceHash) {
     throw new RecoverableError(
       "STALE_CONTENT",
       "Approved Function file changed since it was read",

@@ -52,12 +52,10 @@ function proposalForContract(contract) {
     ...withoutVersions,
     project: { name: contract.project.name },
     functions: contract.functions.map((fn) => ({
-      ...fn,
-      purpose: fn.purpose ?? `Test purpose for ${fn.name}`,
-      requirements: fn.requirements ?? ["Return a deterministic value matching the declared target artifact"],
-      behaviorReview: fn.behaviorReview ?? completeBehaviorReview,
-      behaviorEvidence: fn.behaviorEvidence ?? fixtureBehaviorEvidence,
-      behaviorDecisions: fn.behaviorDecisions ?? fixtureBehaviorDecisions,
+      name: fn.name,
+      parameters: fn.parameters,
+      ...(fn.purpose ? { purpose: fn.purpose } : {}),
+      ...(fn.requirements ? { requirements: fn.requirements } : {}),
     })),
   };
 }
@@ -148,8 +146,8 @@ async function tableArtifactProject() {
   await execFileAsync(process.env.PI_R_WORKER_RSCRIPT, ["--vanilla", "-e", "targets::tar_make(reporter = 'silent', callr_function = NULL)"], { cwd: root, timeout: 30_000 });
   const head = await git(root, "rev-parse", "HEAD");
   const state = {
-    version: 5,
-    runtimeVersion: "0.23.0",
+    version: 6,
+    runtimeVersion: "0.24.0",
     phase: "implementation",
     projectRoot: root,
     workingDirectory: root,
@@ -296,7 +294,7 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
   assert.equal(h.appended[0].customType, "pi-r-workbench-state");
   assert.equal(h.appended[0].data.phase, "design");
   assert.deepEqual(h.appended[0].data.readOnlyRoots, [await realpath(attached)]);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_behavior_decision_record", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect", ]);
   const patterns = h.tools.flatMap((tool) => schemaPatterns(tool.parameters));
   assert.ok(patterns.length > 0);
   assert.equal(patterns.every((pattern) => pattern.startsWith("^") && pattern.endsWith("$")), true, `local llama.cpp requires anchored JSON Schema patterns: ${patterns.join(", ")}`);
@@ -327,28 +325,8 @@ test("/r start stashes tracked changes and enters a dedicated constrained branch
     await h.handlers.get("tool_call")({ toolName: "grep", input: { path: root, pattern: "secret" } }, ctx),
     { block: true, reason: "pi-r blocks raw or directory-wide content searches; narrow grep to one non-raw text file or use r_data_inspect" },
   );
-  await h.handlers.get("context")({ messages: [
-    { role: "assistant", content: "Should future_fn preserve all input rows?" },
-    { role: "user", content: "future_fn must preserve all input rows." },
-  ] }, ctx);
-  const initialDecision = await h.tools.find((tool) => tool.name === "r_behavior_decision_record").execute(
-    "record-before-first-proposal",
-    {
-      decisionId: "INITIAL-D1",
-      question: "Should future_fn preserve all input rows?",
-      answerQuote: "future_fn must preserve all input rows",
-      functions: ["future_fn"],
-      categories: ["cohort"],
-    },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.equal(initialDecision.details.status, "recorded");
-  assert.equal(await git(root, "check-ignore", ".pi/tmp/pi-r-behavior-decisions.json"), ".pi/tmp/pi-r-behavior-decisions.json");
-  assert.equal(JSON.parse(await readFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "utf8")).length, 1);
   assert.match(ctx.widgets.at(-1)[1][0], /mode=design duty=contract-design contract=missing topology=editable/);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 behavior-blocked=0 approval=none worker=stopped runtime=0\.23\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=0 analysis-notes=living approval=none worker=stopped runtime=0\.24\.0 branch=pi-r\/workbench@[0-9a-f]{7,}/);
 
   await h.commands[0].options.handler("stop", ctx);
   assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "bash", "edit", "write"]);
@@ -598,7 +576,7 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   const ctx = context(root);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
   assert.ok(evaluate, "Design Mode must expose structured R evaluation");
 
   const previousPath = process.env.PATH;
@@ -652,7 +630,7 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(rolledBack.details.stateDelta.rolledBack, true);
   assert.equal(rolledBack.details.objects.some((object) => object.name === "orphan"), false);
   assert.equal(rolledBack.details.objects.some((object) => object.name === "direct_intruder"), false);
-  const inspected = await h.tools.find((tool) => tool.name === "r_object_inspect").execute("inspect-x", {
+  const inspected = await h.tools.find((tool) => tool.name === "r_inspect").execute("inspect-x", {
     name: "x",
     columns: [],
     columnOffset: 0,
@@ -708,7 +686,7 @@ test("design mode lazily evaluates structured R calls in one persistent sandbox"
   assert.equal(boundedSnapshot.objectsTruncated, true);
   assert.ok(boundedSnapshot.objects.length <= 50);
   assert.ok(boundedMessage.content.length <= 4096);
-  const boundedStatus = await h.tools.find((tool) => tool.name === "r_worker_status")
+  const boundedStatus = await h.tools.find((tool) => tool.name === "r_status")
     .execute("bounded-status", {}, undefined, undefined, ctx);
   const projectedStatus = JSON.parse(boundedStatus.content[0].text);
   assert.ok(Buffer.byteLength(boundedStatus.content[0].text) <= 8192);
@@ -726,10 +704,11 @@ test("framed worker responses tolerate and log unexpected process stdout", { tim
     await h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx);
   });
   await h.commands[0].options.handler("start", ctx);
-  const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
-    .execute("noisy", { code: "1L", targets: [], retain: [] }, undefined, undefined, ctx);
+  const execTool = h.tools.find((tool) => tool.name === "r_exec");
+  assert.ok(execTool, `registered tools: ${h.tools.map((tool) => tool.name).join(", ")}; notifications: ${ctx.notifications.map((entry) => entry[0]).join(" | ")}`);
+  const evaluated = await execTool.execute("noisy", { code: "1L", targets: [], retain: [] }, undefined, undefined, ctx);
   assert.equal(evaluated.details.value, 1);
-  const status = await h.tools.find((tool) => tool.name === "r_worker_status")
+  const status = await h.tools.find((tool) => tool.name === "r_status")
     .execute("status", {}, undefined, undefined, ctx);
   assert.match(await readFile(status.details.logPath, "utf8"), /unexpected-stdout: unframed startup diagnostic/);
 });
@@ -742,7 +721,7 @@ test("the worker can write temporary storage but cannot mutate project or attach
   const ctx = context(root);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler(`start ${attached}`, ctx);
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
 
   const readable = await evaluate.execute("read-attached", {
     code: `readLines(${JSON.stringify(join(attached, "input.txt"))})`,
@@ -772,10 +751,10 @@ test("worker status, reset, and crash recovery report transient state loss", { t
   const ctx = context(root);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
-  const status = h.tools.find((tool) => tool.name === "r_worker_status");
-  const clear = h.tools.find((tool) => tool.name === "r_worker_clear");
-  const reset = h.tools.find((tool) => tool.name === "r_worker_reset");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
+  const status = h.tools.find((tool) => tool.name === "r_status");
+  const clear = h.tools.find((tool) => tool.name === "r_clear");
+  const reset = h.tools.find((tool) => tool.name === "r_reset");
   await evaluate.execute("assign", { code: "temporary_object <- rep(1L, 100L)", targets: [], retain: ["temporary_object"] }, undefined, undefined, ctx);
 
   const running = await status.execute("status", {}, undefined, undefined, ctx);
@@ -827,6 +806,10 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   const proposal = h.tools.find((tool) => tool.name === "r_contract_propose");
   assert.ok(proposal);
   const contract = await fixtureContract();
+  assert.deepEqual(proposal.parameters.properties.functions.items.required, ["name", "parameters"]);
+  assert.equal(proposal.parameters.properties.functions.items.properties.behaviorReview, undefined);
+  assert.equal(proposal.parameters.properties.functions.items.properties.behaviorEvidence, undefined);
+  assert.equal(proposal.parameters.properties.functions.items.properties.behaviorDecisions, undefined);
   const proposalInput = proposalForContract((contract));
   const proposed = await proposal.execute("proposal-1", proposalInput, undefined, undefined, ctx);
 
@@ -840,12 +823,6 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   await assert.rejects(
     proposal.execute("proposal-authority", { ...proposalInput, policyVersion: "pi-r-policy-v999" }, undefined, undefined, ctx),
     /proposal rejected.*unknown fields/i,
-  );
-  const missingJoinDecision = structuredClone(proposalInput);
-  missingJoinDecision.functions[0].behaviorReview.joins = "Join inputs using the approved participant key";
-  await assert.rejects(
-    proposal.execute("proposal-missing-join-decision", missingJoinDecision, undefined, undefined, ctx),
-    /behaviorDecisions\.joins is required by the joins review/,
   );
   const invalid = structuredClone(proposalInput);
   invalid.targets[0].function = "not_approved";
@@ -877,7 +854,7 @@ test("typed proposals preserve one ignored draft and /r lock commits the reviewe
   assert.match(ctx.confirmationRequests[0][1], /Functions and signatures[\s\S]*Constants[\s\S]*Dependencies[\s\S]*Target graph[\s\S]*Generated-source diff[\s\S]*diff --pi-r/);
   assert.equal(h.appended.at(-1).data.phase, "implementation");
   assert.equal(h.appended.at(-1).data.editableScopeCount, contract.functions.length);
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "edit", "write", "r_function_inspect", "r_function_edit", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   assert.equal(await git(root, "status", "--porcelain"), "");
 });
 
@@ -959,7 +936,7 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
 
   const inspect = h.tools.find((tool) => tool.name === "r_function_inspect");
   const edit = h.tools.find((tool) => tool.name === "r_function_edit");
-  assert.deepEqual(edit.parameters.required, ["function", "expectedSourceHash", "statements"]);
+  assert.deepEqual(edit.parameters.required, ["function", "statements"]);
   assert.equal(edit.parameters.properties.operation, undefined);
   const inspected = await inspectFunction(inspect, "inspect", "load_input", ctx);
   await assert.rejects(
@@ -1048,7 +1025,7 @@ test("Contract Revision preserves implemented bodies and supports cancel or tran
   assert.equal(await readFile(join(root, "R/load_input.R"), "utf8"), implemented);
 });
 
-test("evaluate_r loads only explicitly requested targets under canonical names", { timeout: 60_000 }, async (t) => {
+test("r_exec loads only explicitly requested targets under canonical names", { timeout: 60_000 }, async (t) => {
   const root = await repository();
   await writeFile(join(root, "_targets.R"), [
     "library(targets)",
@@ -1065,7 +1042,7 @@ test("evaluate_r loads only explicitly requested targets under canonical names",
   const ctx = context(root);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
 
   const loaded = await evaluate.execute("load-target", {
     code: "temporary_copy <- sample_target; temporary_copy",
@@ -1075,7 +1052,7 @@ test("evaluate_r loads only explicitly requested targets under canonical names",
   assert.equal(loaded.details.error, null);
   assert.equal(loaded.details.value, 42);
   assert.ok(loaded.details.objects.some((object) => object.name === "sample_target" && object.origin === "target"));
-  const cleared = await h.tools.find((tool) => tool.name === "r_worker_clear").execute("clear-target-context", {}, undefined, undefined, ctx);
+  const cleared = await h.tools.find((tool) => tool.name === "r_clear").execute("clear-target-context", {}, undefined, undefined, ctx);
   assert.equal(cleared.details.objects.some((object) => object.name === "temporary_copy"), false);
   assert.equal(cleared.details.objects.find((object) => object.name === "sample_target").origin, "target");
   const loadedSnapshot = currentState((await h.handlers.get("context")({ messages: [] }, ctx)).messages[0].content);
@@ -1098,7 +1075,7 @@ test("locking restarts exploration in the generated environment with canonical g
   const ctx = context(root, [], [true]);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
   await evaluate.execute("design-state", { code: "design_only <- 99L", targets: [], retain: ["design_only"] }, undefined, undefined, ctx);
   const contract = await fixtureContract();
   await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
@@ -1146,7 +1123,7 @@ test("governed dependency proposals validate before one approved environment com
 
   const dependency = h.tools.find((tool) => tool.name === "r_dependency_propose");
   assert.ok(dependency, "Implementation Mode must expose governed dependency proposals");
-  const evaluate = h.tools.find((tool) => tool.name === "evaluate_r");
+  const evaluate = h.tools.find((tool) => tool.name === "r_exec");
   await evaluate.execute("retain-until-approval", { code: "temporary_before_environment <- 1L", targets: [], retain: ["temporary_before_environment"] }, undefined, undefined, ctx);
   const initialHead = await git(root, "rev-parse", "HEAD");
   const initialContract = await readFile(join(root, "pi-r.yml"), "utf8");
@@ -1226,7 +1203,7 @@ console.log(JSON.stringify({ type: "tool_result_end", message: { toolName: "scou
   );
   assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
   assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
-  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("after-resolution-failure", {}, undefined, undefined, ctx)).details.state, "running");
+  assert.equal((await h.tools.find((tool) => tool.name === "r_status").execute("after-resolution-failure", {}, undefined, undefined, ctx)).details.state, "running");
 
   await assert.rejects(
     dependency.execute("required-removal", {
@@ -1277,11 +1254,11 @@ console.log(JSON.stringify({ type: "tool_result_end", message: { toolName: "scou
   assert.equal(proposed.details.nextContract.dependencies.includes("digest"), true);
   assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
   assert.equal(await readFile(join(root, "pi-r.yml"), "utf8"), initialContract);
-  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("still-running", {}, undefined, undefined, ctx)).details.state, "running");
+  assert.equal((await h.tools.find((tool) => tool.name === "r_status").execute("still-running", {}, undefined, undefined, ctx)).details.state, "running");
 
   await h.commands[0].options.handler("environment", ctx);
   assert.equal(await git(root, "rev-parse", "HEAD"), initialHead);
-  assert.equal((await h.tools.find((tool) => tool.name === "r_worker_status").execute("after-cancel", {}, undefined, undefined, ctx)).details.state, "running");
+  assert.equal((await h.tools.find((tool) => tool.name === "r_status").execute("after-cancel", {}, undefined, undefined, ctx)).details.state, "running");
   assert.match(ctx.notifications.at(-1)[0], /cancelled.*candidate preserved/i);
 
   await h.commands[0].options.handler("environment", ctx);
@@ -1477,7 +1454,7 @@ test("target execution requires explicit contracted names and stores complete lo
   const loaded = await loadWorkspace.execute("workspace", { target: "broken" }, undefined, undefined, ctx);
   assert.equal(loaded.details.target, "broken");
   assert.ok(loaded.details.objects.some((object) => object.name === "answer"), JSON.stringify(loaded.details));
-  const evaluated = await h.tools.find((tool) => tool.name === "evaluate_r")
+  const evaluated = await h.tools.find((tool) => tool.name === "r_exec")
     .execute("diagnose", { code: "readLines(answer)", targets: [], retain: [] }, undefined, undefined, ctx);
   assert.equal(evaluated.details.value, "43");
 
@@ -1516,12 +1493,12 @@ test("table artifact inspection returns structure and summaries without rows and
   assert.equal("rows" in inspected.details.structure, false);
   assert.doesNotMatch(inspected.content[0].text, /\"a\"|\"b\"/);
   assert.deepEqual(inspected.details.warnings, []);
-  await h.tools.find((tool) => tool.name === "evaluate_r").execute("retain-table", {
+  await h.tools.find((tool) => tool.name === "r_exec").execute("retain-table", {
     code: "working_table <- sample_table; nrow(working_table)",
     targets: ["sample_table"],
     retain: ["working_table"],
   }, undefined, undefined, ctx);
-  const retainedTable = await h.tools.find((tool) => tool.name === "r_object_inspect").execute("inspect-retained-table", {
+  const retainedTable = await h.tools.find((tool) => tool.name === "r_inspect").execute("inspect-retained-table", {
     name: "working_table",
     columns: ["value"],
     columnOffset: 0,
@@ -1547,20 +1524,9 @@ test("table artifact inspection returns structure and summaries without rows and
   assert.equal(functionState.details.behavior.specified, true);
   assert.match(functionState.details.behavior.requirements[0], /two rows keyed by value/);
   const legacyState = await inspectFunction(functionTool, "inspect-legacy-maker", "make_object", ctx);
-  assert.equal(legacyState.details.behavior.specified, false);
-  assert.equal(legacyState.details.behavior.requirementCount, 0);
-  assert.deepEqual(JSON.parse(legacyState.content[0].text).nextAction, {
-    actor: "user",
-    command: "/r revise",
-    action: "Approve purpose and requirements before implementation planning",
-  });
-  assert.equal(legacyState.details.sourceHash, undefined);
-  assert.equal(JSON.parse(legacyState.content[0].text).blockingReason, "BEHAVIOR_UNSPECIFIED");
-  await assert.rejects(editTool.execute("reject-legacy-maker", {
-    function: "make_object",
-    expectedSourceHash: undefined,
-    operation: { kind: "replace", body: "{\nlist(value = seed)\n}" },
-  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  assert.equal(legacyState.details.behavior.specified, true);
+  assert.equal(legacyState.details.behavior.requirements.length, 0);
+  assert.equal(legacyState.details.sourceHash !== undefined, true);
   const refreshedFunctionState = await inspectFunction(functionTool, "inspect-maker-again", "make_table", ctx);
   await editTool.execute("replace-maker", {
     function: "make_table",
@@ -1585,167 +1551,29 @@ test("table artifact inspection returns structure and summaries without rows and
   assert.equal(listed.details.targets.find((target) => target.name === "sample_table").freshness, "current");
 });
 
-test("legacy behavior requires a behavior-only revision before relocking", { timeout: 180_000 }, async (t) => {
+test("legacy descriptive behavior never blocks provisional implementation", { timeout: 60_000 }, async (t) => {
   const { root, entries } = await tableArtifactProject();
   entries[0].data.editableScopeCount = 99;
-  entries[0].data.behaviorBlockedCount = 0;
+  entries[0].data.behaviorBlockedCount = 99;
   const h = harness(entries);
-  const ctx = context(root, entries, [true, true]);
+  const ctx = context(root, entries);
   t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.handlers.get("session_start")({ reason: "resume" }, ctx);
-  assert.equal(h.appended.length, 0);
-  assert.match(ctx.widgets.at(-1)[1][0], /scopes=1 behavior-blocked=1 approval=revision-required/);
-
-  await h.commands[0].options.handler("revise", ctx);
-  assert.ok(h.activeToolChanges.at(-1).includes("r_function_behavior_propose"));
-  assert.ok(h.activeToolChanges.at(-1).includes("r_contract_draft_inspect"));
-  const draftStatus = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
-    "inspect-legacy-draft",
-    { view: "overview", function: "", functionOffset: 0, functionLimit: 5 },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.equal(draftStatus.details.status, "review-incomplete");
-  assert.equal(draftStatus.details.topology.changed, false);
-  assert.equal(draftStatus.details.functionPage.returned, 2);
-  assert.equal(JSON.parse(draftStatus.content[0].text).modelOutputTruncated, undefined);
-  const makeObjectOverview = draftStatus.details.functions.find((fn) => fn.name === "make_object");
-  assert.equal(makeObjectOverview.missingBehaviorFieldCount, 15);
-  const makeObjectDetail = await h.tools.find((tool) => tool.name === "r_contract_draft_inspect").execute(
-    "inspect-legacy-function",
-    { view: "function", function: "make_object", functionOffset: 0, functionLimit: 1 },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.ok(makeObjectDetail.details.function.missingBehaviorFields.includes("make_object:duplicates"));
-  assert.equal(makeObjectDetail.details.function.behaviorDecisions, null);
-  assert.equal(makeObjectDetail.details.operatorDecisionState, "not-derived-from-schema-fields");
-  await h.commands[0].options.handler("lock", ctx);
-  assert.match(ctx.notifications.at(-1)[0], /lock failed:.*proposal has 5 semantic issues.*purpose.*requirements.*behaviorReview.*behaviorEvidence.*behaviorDecisions/is);
-  assert.equal((await git(root, "branch", "--show-current")), "pi-r/workbench");
-
-  const behaviorTool = h.tools.find((tool) => tool.name === "r_function_behavior_propose");
-  await assert.rejects(behaviorTool.execute("reject-placeholder-evidence", {
-    functions: [{
-      name: "make_object",
-      purpose: "Return the approved bounded object",
-      requirements: ["Return a deterministic object"],
-      behaviorReview: completeBehaviorReview,
-      behaviorEvidence: [{ kind: "user-decision", reference: "TBD" }],
-      behaviorDecisions: fixtureBehaviorDecisions,
-    }],
-  }, undefined, undefined, ctx), /Behavior evidence.*identify/i);
-  await assert.rejects(behaviorTool.execute("reject-unrecorded-decision", {
-    functions: [{
-      name: "make_object",
-      purpose: "Return the approved bounded object",
-      requirements: ["Return a deterministic object"],
-      behaviorReview: completeBehaviorReview,
-      behaviorEvidence: [{
-        kind: "user-decision",
-        reference: "Invented approval",
-        decisionId: "FAKE-D1",
-        question: "Invented question?",
-        questionHash: `sha256:${"1".repeat(64)}`,
-        answer: "sure",
-        messageHash: `sha256:${"0".repeat(64)}`,
-      }],
-      behaviorDecisions: fixtureBehaviorDecisions,
-    }],
-  }, undefined, undefined, ctx), /UNVERIFIED_USER_DECISION/);
-  await h.handlers.get("context")({ messages: [
-    { role: "assistant", content: "How should unrelated duplicates be handled?" },
-    { role: "user", content: "Keep the first duplicate." },
-    { role: "assistant", content: "Should every remaining behavior category use the proposed defaults?" },
-    { role: "user", content: "looks fine" },
-    { role: "assistant", content: "What exact object must make_object return?" },
-    { role: "user", content: "For TEST-D1, return value equal to seed and label equal to bounded." },
-  ] }, ctx);
-  const decisionTool = h.tools.find((tool) => tool.name === "r_behavior_decision_record");
-  await assert.rejects(decisionTool.execute(
-    "reject-broad-approval",
-    {
-      decisionId: "TEST-D-BROAD",
-      question: "Should every remaining behavior category use the proposed defaults?",
-      answerQuote: "looks fine",
-      functions: ["make_object"],
-      categories: ["missing-values", "output-schema"],
-    },
-    undefined,
-    undefined,
-    ctx,
-  ), /AMBIGUOUS_USER_DECISION/);
-  await assert.rejects(decisionTool.execute(
-    "reject-unrelated-prior-answer",
-    {
-      decisionId: "TEST-D-UNRELATED",
-      question: "What exact object must make_object return?",
-      answerQuote: "Keep the first duplicate",
-      functions: ["make_object"],
-      categories: ["output-schema"],
-    },
-    undefined,
-    undefined,
-    ctx,
-  ), /UNVERIFIED_USER_DECISION/);
-  await assert.rejects(decisionTool.execute(
-    "reject-paraphrased-decision",
-    {
-      decisionId: "TEST-D0",
-      question: "What exact object must make_object return?",
-      answerQuote: "The user generally approved the output plan",
-      functions: ["make_object"],
-      categories: ["output-schema"],
-    },
-    undefined,
-    undefined,
-    ctx,
-  ), /UNVERIFIED_USER_DECISION/);
-  const recorded = await decisionTool.execute(
-    "record-test-decision",
-    {
-      decisionId: "TEST-D1",
-      question: "What exact object must make_object return?",
-      answerQuote: "return value equal to seed and label equal to bounded",
-      functions: ["make_object"],
-      categories: ["output-schema"],
-    },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.equal(recorded.details.status, "recorded");
-  const proposed = await behaviorTool.execute("migrate-behavior", {
-    functions: [{
-      name: "make_object",
-      purpose: "Return the approved bounded object",
-      requirements: ["Return a list containing value equal to seed and label equal to bounded"],
-      behaviorReview: completeBehaviorReview,
-      behaviorEvidence: [recorded.details.evidence, ...fixtureBehaviorEvidence],
-      behaviorDecisions: fixtureBehaviorDecisions,
-    }],
+  assert.match(ctx.widgets.at(-1)[1][0], /scopes=2 analysis-notes=living approval=none/);
+  const inspected = await inspectFunction(h.tools.find((tool) => tool.name === "r_function_inspect"), "legacy-inspect", "make_object", ctx);
+  assert.equal(inspected.details.behavior.specified, true);
+  const edited = await h.tools.find((tool) => tool.name === "r_function_edit").execute("legacy-direct-edit", {
+    function: "make_object",
+    statements: "list(value = seed, label = 'provisional')",
   }, undefined, undefined, ctx);
-  assert.equal(proposed.details.status, "ready-for-user-lock-review");
-  assert.deepEqual(proposed.details.unresolvedFunctions, []);
-
-  await h.commands[0].options.handler("lock", ctx);
-  assert.equal(h.appended.at(-1).data.phase, "implementation");
-  assert.equal(h.appended.at(-1).data.behaviorBlockedCount, 0);
-  assert.equal(h.appended.at(-1).data.editableScopeCount, 2);
-  const locked = JSON.parse(await readFile(join(root, "pi-r.yml"), "utf8"));
-  const migrated = locked.functions.find((fn) => fn.name === "make_object");
-  assert.equal(migrated.purpose, "Return the approved bounded object");
-  assert.equal(migrated.behaviorReview.duplicates, completeBehaviorReview.duplicates);
-  assert.deepEqual(migrated.behaviorEvidence, [recorded.details.evidence, ...fixtureBehaviorEvidence]);
-  assert.deepEqual(migrated.behaviorDecisions, fixtureBehaviorDecisions);
+  assert.equal(edited.details.function, "make_object");
 });
 
-test("implementation mode commits only validated Approved Function body edits", async () => {
+test("implementation mode supports optional scoped commits and provisional source", async (t) => {
   const root = await repository();
   const h = harness();
   const ctx = context(root, [], [true]);
+  t.after(async () => h.handlers.get("session_shutdown")({ reason: "test-complete" }, ctx));
   await h.commands[0].options.handler("start", ctx);
   const contract = await fixtureContract();
   await h.tools.find((tool) => tool.name === "r_contract_propose").execute("proposal", proposalForContract((contract)), undefined, undefined, ctx);
@@ -1767,11 +1595,11 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.doesNotMatch(batch.content[0].text, /Not implemented/);
   assert.doesNotThrow(() => JSON.parse(batch.content[0].text));
   assert.equal(batch.details.functions.every((entry) => entry.sourceHash === undefined), true);
-  await assert.rejects(editTool.execute("edit-with-stale-inspection-grant", {
+  const direct = await editTool.execute("edit-without-inspection-grant", {
     function: "load_input",
-    expectedSourceHash: inspected.details.sourceHash,
-    operation: { kind: "replace", body: "{\npath\n}" },
-  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+    statements: "path",
+  }, undefined, undefined, ctx);
+  assert.equal(direct.details.function, "load_input");
   const immediateInspection = await inspectFunction(inspectTool, "inspect-immediate", "load_input", ctx);
   const headBefore = await git(root, "rev-parse", "HEAD");
 
@@ -1798,10 +1626,16 @@ test("implementation mode commits only validated Approved Function body edits", 
     await git(root, "log", "-1", "--format=%B"),
     /Capability: r-function-body-edit-v1[\s\S]*Contract-Version: 1[\s\S]*Policy-Version: pi-r-policy-v1/,
   );
-  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_function_inspect", "r_function_edit", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
+  assert.deepEqual(h.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "edit", "write", "r_function_inspect", "r_function_edit", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect", "r_targets_list", "r_targets_run", "r_target_workspace", "r_artifact_inspect", "r_dependency_propose", "r_dependency_scout"]);
   const gate = h.handlers.get("tool_call");
   assert.equal((await gate({ toolName: "bash", input: { command: "true" } }, ctx)).block, true);
-  assert.equal((await gate({ toolName: "write", input: { path } }, ctx)).block, true);
+  assert.equal((await gate({ toolName: "write", input: { path: "docs/analysis-plan.md" } }, ctx)), undefined);
+  assert.equal((await gate({ toolName: "write", input: { path: "flake.nix" } }, ctx)).block, true);
+  const outsideEditRoot = await mkdtemp(join(tmpdir(), "pi-r-edit-escape-"));
+  await mkdir(join(root, "docs"), { recursive: true });
+  await symlink(outsideEditRoot, join(root, "docs/escape"));
+  assert.equal((await gate({ toolName: "write", input: { path: "docs/escape/outside.md" } }, ctx)).block, true);
+  await rm(join(root, "docs/escape"));
 
   const patchInspection = await inspectFunction(inspectTool, "inspect-2", "load_input", ctx);
   const patchHead = await git(root, "rev-parse", "HEAD");
@@ -1813,6 +1647,16 @@ test("implementation mode commits only validated Approved Function body edits", 
   assert.equal(await git(root, "rev-list", "--count", `${patchHead}..HEAD`), "1");
   assert.match(await readFile(path, "utf8"), /toupper\(identity_local\(item\)\)/);
   assert.equal(await git(root, "status", "--porcelain"), "");
+  await writeFile(path, "load_input <- function(path) {\n  paste0(path, '-provisional')\n}\n");
+  const provisionalExec = await h.tools.find((tool) => tool.name === "r_exec").execute(
+    "exec-with-provisional-source",
+    { code: "1L" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(provisionalExec.details.value, 1);
+  assert.match(await git(root, "status", "--porcelain"), /R\/load_input[.]R/);
 });
 
 test("policy, syntax, formatter, stale-content, and scope failures do not mutate or commit", async () => {
@@ -1854,12 +1698,12 @@ test("policy, syntax, formatter, stale-content, and scope failures do not mutate
     function: "load_input",
     expectedSourceHash: `sha256:${"0".repeat(64)}`,
     operation: { kind: "replace", body: "{\npath\n}" },
-  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  }, undefined, undefined, ctx), /STALE_CONTENT/);
   await assert.rejects(editTool.execute("scope", {
     function: "not_approved",
     expectedSourceHash: digest,
     operation: { kind: "replace", body: "{\nNULL\n}" },
-  }, undefined, undefined, ctx), /INSPECTION_REQUIRED/);
+  }, undefined, undefined, ctx), /SCOPE_VIOLATION/);
   const syntaxDigest = await inspectDigest("inspect-syntax");
   await assert.rejects(editTool.execute("syntax", {
     function: "load_input",
@@ -1892,13 +1736,10 @@ test("persisted workbench state resumes only when project and branch still match
   const entries = structuredClone(first.appended);
   entries[0].data.allowedTools = ["bash"];
 
-  await mkdir(join(root, ".pi/tmp"), { recursive: true });
-  await writeFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "[{\"decisionId\":\"OLD\",\"sessionToken\":\"prior-session\"}]\n");
   const resumed = harness(entries);
   const resumedContext = context(root, entries);
   await resumed.handlers.get("session_start")({ reason: "resume" }, resumedContext);
-  assert.deepEqual(JSON.parse(await readFile(join(root, ".pi/tmp/pi-r-behavior-decisions.json"), "utf8")), []);
-  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_behavior_decision_record", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect", ]);
+  assert.deepEqual(resumed.activeToolChanges.at(-1), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect", ]);
   await resumed.commands[0].options.handler("status", resumedContext);
   assert.match(resumedContext.notifications.at(-1)[0], /mode=design .*branch=pi-r\/workbench@/);
 
@@ -1908,7 +1749,7 @@ test("persisted workbench state resumes only when project and branch still match
   const staleContext = context(root, staleEntries);
   await stale.handlers.get("session_start")({ reason: "resume" }, staleContext);
   assert.deepEqual(stale.activeToolChanges.at(-1), []);
-  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.23\.0.*fresh Pi session/i);
+  assert.match(staleContext.notifications.at(-1)[0], /incompatible with pi-r 0\.24\.0.*fresh Pi session/i);
   assert.deepEqual(staleContext.widgets.at(-1), ["pi-r-hud", ["pi-r RESUME BLOCKED", staleContext.notifications.at(-1)[0]]]);
   const blockedPrompt = await stale.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(blockedPrompt.systemPrompt, /No tools are available.*Do not emit remembered tool calls.*\/r start/s);
